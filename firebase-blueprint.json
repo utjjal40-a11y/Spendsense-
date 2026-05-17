@@ -1,0 +1,56 @@
+{
+  "entities": {
+    "Transaction": {
+      "title": "Transaction",
+      "description": "An income or expense transaction recorded by the user.",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string", "description": "The UID of the user who owns this transaction." },
+        "type": { "type": "string", "enum": ["income", "expense"] },
+        "amount": { "type": "number" },
+        "description": { "type": "string" },
+        "category": { "type": "string" },
+        "date": { "type": "string", "format": "date-time" }
+      },
+      "required": ["userId", "type", "amount", "description", "category", "date"]
+    },
+    "Message": {
+      "title": "Message",
+      "description": "A chat message in the conversation history.",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string", "description": "The UID of the user who sent or received this message." },
+        "from": { "type": "string", "enum": ["bot", "user"] },
+        "text": { "type": "string" },
+        "timestamp": { "type": "number" }
+      },
+      "required": ["userId", "from", "text", "timestamp"]
+    },
+    "UserConfig": {
+      "title": "UserConfig",
+      "description": "User-specific configuration like budgets.",
+      "type": "object",
+      "properties": {
+        "categoryBudgets": {
+          "type": "object",
+          "description": "Map of category names to budget amounts."
+        }
+      },
+      "required": ["categoryBudgets"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}/transactions/{transactionId}": {
+      "schema": "Transaction",
+      "description": "User's financial transactions."
+    },
+    "/users/{userId}/messages/{messageId}": {
+      "schema": "Message",
+      "description": "User's chat message history."
+    },
+    "/users/{userId}/config/budgets": {
+      "schema": "UserConfig",
+      "description": "User's budget settings."
+    }
+  }
+}

@@ -1,0 +1,86 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Default deny
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // Helper functions
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    // Validation patterns
+    function isValidTransaction(data) {
+      return data.keys().hasAll(['userId', 'type', 'amount', 'description', 'category', 'date']) &&
+             data.keys().size() == 6 &&
+             data.userId == request.auth.uid &&
+             data.type in ['income', 'expense'] &&
+             data.amount is number &&
+             data.description is string && data.description.size() <= 500 &&
+             data.category is string &&
+             data.date is string;
+    }
+
+    function isValidMessage(data) {
+      return data.keys().hasAll(['userId', 'from', 'text', 'timestamp']) &&
+             data.keys().size() == 4 &&
+             data.userId == request.auth.uid &&
+             data.from in ['bot', 'user'] &&
+             data.text is string && data.text.size() <= 5000 &&
+             data.timestamp is number;
+    }
+
+    function isValidConfig(data) {
+      return data.keys().hasAll(['categoryBudgets']) &&
+             data.keys().size() == 1 &&
+             data.categoryBudgets is map;
+    }
+
+    // User collection gate
+    match /users/{userId} {
+      allow get: if isOwner(userId);
+      
+      match /transactions/{transactionId} {
+        allow list: if isOwner(userId);
+        allow get: if isOwner(userId);
+        allow create: if isOwner(userId) && isValidTransaction(incoming());
+        allow update: if isOwner(userId) && isValidTransaction(incoming()) && 
+                        incoming().userId == existing().userId &&
+                        incoming().date == existing().date; // date immutable
+        allow delete: if isOwner(userId);
+      }
+
+      match /messages/{messageId} {
+        allow list: if isOwner(userId);
+        allow get: if isOwner(userId);
+        allow create: if isOwner(userId) && isValidMessage(incoming());
+        allow update: if false; // messages immutable
+        allow delete: if isOwner(userId);
+      }
+
+      match /config/budgets {
+        allow get: if isOwner(userId);
+        allow create, update: if isOwner(userId) && isValidConfig(incoming());
+        allow delete: if isOwner(userId);
+      }
+    }
+  }
+}
