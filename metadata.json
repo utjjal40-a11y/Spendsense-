@@ -1,0 +1,8 @@
+{
+  "name": "SpendSense",
+  "description": "WhatsApp-style smart expense tracker with AI natural language parsing and visual spending analytics.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
