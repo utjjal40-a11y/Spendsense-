@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, FormEvent } from "react";
 import { motion, AnimatePresence } from "motion/react";
 import { 
   Send, 
@@ -30,7 +30,22 @@ import {
   Share2,
   ChevronLeft,
   ChevronRight,
-  Filter
+  Filter,
+  ExternalLink,
+  Sparkles,
+  Edit2,
+  Check,
+  X,
+  CloudLightning,
+  Brain,
+  Activity,
+  Zap,
+  Award,
+  Shield,
+  ShieldCheck,
+  Target,
+  Mic,
+  MicOff
 } from "lucide-react";
 import jsPDF from 'jspdf';
 import autoTable from 'jspdf-autotable';
@@ -48,6 +63,7 @@ import {
   onSnapshot,
   doc,
   setDoc,
+  updateDoc,
   deleteDoc,
   serverTimestamp,
   getDocs
@@ -88,12 +104,24 @@ const CATEGORIES: Record<string, { icon: string; color: string; keywords: string
   Freelance: { icon: "💻", color: "#8b5cf6", keywords: ["freelance","gig","project"] },
   Investment:{ icon: "📈", color: "#10b981", keywords: ["dividend","profit","stocks"] },
   Gift:      { icon: "🎁", color: "#f472b6", keywords: ["gift","bonus"] },
+  Savings:   { icon: "🐷", color: "#fb7185", keywords: ["savings","goal","invest","infuse"] },
   Other:     { icon: "📌", color: "#94a3b8", keywords: [] },
 };
 
 const BUDGET = 30000;
 
 // ─── Types ──────────────────────────────────────────────────────────────────
+interface Goal {
+  id: string;
+  name: string;
+  target: number;
+  current: number;
+  allocatedPercentage: number; // % of monthly savings
+  targetDate?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
 interface Transaction {
   id: string;
   type: "income" | "expense";
@@ -101,6 +129,7 @@ interface Transaction {
   description: string;
   category: string;
   date: string;
+  goalId?: string;
 }
 
 interface Message {
@@ -108,6 +137,8 @@ interface Message {
   from: "bot" | "user";
   text: string;
   timestamp: number;
+  showOpenNewTab?: boolean;
+  showRetryMic?: boolean;
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -187,6 +218,14 @@ function SimplePieChart({ slices, size = 120 }: { slices: { value: number; color
 }
 
 // ─── Component: Main Application ────────────────────────────────────────────────
+// Helper for consistent local date strings (YYYY-MM-DD)
+const getLocalDateString = (date: Date) => {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, '0');
+  const day = String(date.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
+};
+
 export default function App() {
   const [user, setUser] = useState<User | null>(null);
   const [authLoading, setAuthLoading] = useState(true);
@@ -196,27 +235,119 @@ export default function App() {
 
   const [transactions, setTransactions] = useState<Transaction[]>([]);
   const [categoryBudgets, setCategoryBudgets] = useState<Record<string, number>>({
-    Food: 5000,
-    Transport: 3000,
-    Utilities: 2000,
-    Health: 1000,
-    Dining: 3000,
-    Shopping: 5000,
-    Education: 2000,
-    Finance: 5000,
-    Family: 2000,
-    Other: 2000
+    Food: 0,
+    Transport: 0,
+    Utilities: 0,
+    Health: 0,
+    Dining: 0,
+    Shopping: 0,
+    Education: 0,
+    Finance: 0,
+    Family: 0,
+    Other: 0
   });
+
+  const [monthlyIncome, setMonthlyIncome] = useState<number>(0);
+  const [totalDebt, setTotalDebt] = useState<number>(0);
+  const [emergencyFund, setEmergencyFund] = useState<number>(0);
+  const [emergencyFundTarget, setEmergencyFundTarget] = useState<number>(0);
+  const [goals, setGoals] = useState<Goal[]>([]);
+  const [showGoalForm, setShowGoalForm] = useState(false);
+  const [editingGoalId, setEditingGoalId] = useState<string | null>(null);
+  const [goalFormData, setGoalFormData] = useState({
+    name: "",
+    target: "",
+    targetDate: "",
+    allocatedPercentage: 20
+  });
+  const [infuseGoalId, setInfuseGoalId] = useState<string | null>(null);
+  const [infuseMode, setInfuseMode] = useState<'add' | 'subtract'>('add');
+  const [infuseAmount, setInfuseAmount] = useState("");
+  const [deleteConfirmGoalId, setDeleteConfirmGoalId] = useState<string | null>(null);
+  const [isEditingEmergencyTarget, setIsEditingEmergencyTarget] = useState(false);
+  const [tempEmergencyTarget, setTempEmergencyTarget] = useState("");
   
+  const [editingTxId, setEditingTxId] = useState<string | null>(null);
+  const [editingBudgetCat, setEditingBudgetCat] = useState<string | null>(null);
+  const [budgetEditValue, setBudgetEditValue] = useState<string>("");
+  const [editForm, setEditForm] = useState<Partial<Transaction>>({});
+
+
+
+  const [showIncomeForm, setShowIncomeForm] = useState(false);
+  const [incomeFormData, setIncomeFormData] = useState({
+    description: "",
+    category: "Salary",
+    amount: "",
+    date: getLocalDateString(new Date())
+  });
+
+  const handleManualIncome = async (e: FormEvent) => {
+    e.preventDefault();
+    if (!user || !incomeFormData.description || !incomeFormData.amount) return;
+    
+    const amountNum = parseFloat(incomeFormData.amount);
+    if (isNaN(amountNum) || amountNum <= 0) {
+      showToast("Please enter a valid positive amount", "error");
+      return;
+    }
+
+    try {
+      await addDoc(collection(db, "users", user.uid, "transactions"), {
+        type: "income",
+        description: incomeFormData.description,
+        category: incomeFormData.category,
+        amount: amountNum,
+        date: new Date(incomeFormData.date).toISOString(),
+        userId: user.uid,
+        createdAt: serverTimestamp()
+      });
+      showToast("Income logged successfully!", "success");
+      setShowIncomeForm(false);
+      setIncomeFormData({
+        description: "",
+        category: "Salary",
+        amount: "",
+        date: getLocalDateString(new Date())
+      });
+    } catch (e) {
+      handleFirestoreError(e, OperationType.WRITE, `users/${user.uid}/transactions`);
+    }
+  };
+
+
+
+  const saveEdit = async () => {
+    if (!editingTxId || !editForm.amount || !editForm.category) return;
+    
+    if (user) {
+      const path = `users/${user.uid}/transactions/${editingTxId}`;
+      try {
+        const txRef = doc(db, "users", user.uid, "transactions", editingTxId);
+        await updateDoc(txRef, {
+          amount: editForm.amount,
+          description: editForm.description,
+          category: editForm.category,
+          date: editForm.date
+        });
+        showToast("Transaction updated!");
+      } catch (e) {
+        handleFirestoreError(e, OperationType.UPDATE, path);
+      }
+    } else {
+      setTransactions(prev => prev.map(t => t.id === editingTxId ? { ...t, ...editForm } : t));
+      showToast("Updated locally");
+    }
+    setEditingTxId(null);
+  };
   const [messages, setMessages] = useState<Message[]>([{
     id: "welcome",
     from: "bot",
     timestamp: Date.now(),
-    text: "👋 Hi! I'm your Finance AI.\n\nI understand **English, Hindi, and Assamese!**\n\nTry sending:\n- **500 for grocery**\n- **salary aayi 50000** (Hindi)\n- **দোকানত ৩০০ টকা খৰছ** (Assamese)\n- **chai break 20**",
+    text: "👋 Hi! I'm your Finance Assistant.\n\nI can help you track your spending. Just tell me what you spent on, like:\n- **500 for grocery**\n- **chai break 20**",
   }]);
 
-  const [modelFlavor, setModelFlavor] = useState<"gemini" | "gpt">("gemini");
-  const [suggestions, setSuggestions] = useState<string[]>(["Spent 500 on dinner", "Today's summary", "Money saving tips"]);
+  const [suggestions, setSuggestions] = useState<string[]>(["Spent 500 on dinner", "Check balance", "Add 1000 Salary"]);
 
   // Auth Listener
   useEffect(() => {
@@ -270,32 +401,73 @@ export default function App() {
     });
   }, [user]);
 
-  // Firestore Sync: Budgets
+  // Month Initialization: Ensure report tracking defaults to current month from day 1
+  useEffect(() => {
+    const now = new Date();
+    const firstDay = new Date(now.getFullYear(), now.getMonth(), 1);
+    
+    // Update report range to current month on load if it's not custom
+    if (reportRange !== 'custom') {
+      setStartDate(getLocalDateString(firstDay));
+      setEndDate(getLocalDateString(now));
+    }
+  }, [user]);
+
+  // Firestore Sync: Config (Budgets, Income, Debt)
   useEffect(() => {
     if (!user) return;
 
-    const budgetDoc = doc(db, "users", user.uid, "config", "budgets");
-    return onSnapshot(budgetDoc, (doc) => {
+    const configDoc = doc(db, "users", user.uid, "config", "main");
+    return onSnapshot(configDoc, (doc) => {
       if (doc.exists()) {
-        setCategoryBudgets(doc.data().categoryBudgets);
+        const data = doc.data();
+        if (data.categoryBudgets) setCategoryBudgets(data.categoryBudgets);
+        if (data.monthlyIncome) setMonthlyIncome(data.monthlyIncome);
+        if (data.totalDebt) setTotalDebt(data.totalDebt);
+        if (data.emergencyFund) setEmergencyFund(data.emergencyFund);
+        if (data.emergencyFundTarget) setEmergencyFundTarget(data.emergencyFundTarget);
+        if (data.goals) {
+          const sanitizedGoals = data.goals.map((g: any) => ({
+            ...g,
+            allocatedPercentage: g.allocatedPercentage ?? 20,
+            current: g.current ?? 0,
+            target: g.target ?? 0,
+            targetDate: g.targetDate ?? "",
+            createdAt: g.createdAt ?? new Date().toISOString(),
+            updatedAt: g.updatedAt ?? new Date().toISOString()
+          }));
+          setGoals(sanitizedGoals);
+        }
       }
     });
   }, [user]);
 
+  const openInNewTab = () => {
+    window.open(window.location.href, '_blank');
+  };
+
   const login = async () => {
     if (isLoggingIn) return;
     setIsLoggingIn(true);
+    
+    const isIframe = window.self !== window.top;
+    
     try {
+      // If we are in an iframe, warn the user first or just try popup
       await signInWithPopup(auth, googleProvider);
       showToast("Signed in successfully!");
     } catch (error: any) {
       console.error("Login failed", error);
-      if (error?.code === 'auth/cancelled-popup-request') {
-        showToast("Sign-in process was already open. Please check other windows.", "warn");
-      } else if (error?.code === 'auth/popup-closed-by-user') {
-        showToast("Sign-in popup closed. Please try again.", "warn");
+      
+      if (error?.code === 'auth/popup-closed-by-user') {
+        showToast("Popup closed. If you didn't close it, try in a new tab.", "warn");
+      } else if (error?.code === 'auth/popup-blocked') {
+        showToast("Popup blocked! Click the 'New Tab' button to login.", "error");
+      } else if (isIframe) {
+        showToast("Login restricted in iframe. Opening in new tab...", "warn");
+        setTimeout(openInNewTab, 1500);
       } else {
-        showToast("Sign in failed. Possible popup blocker.", "error");
+        showToast("Sign in failed. Use Chrome or check settings.", "error");
       }
     } finally {
       setIsLoggingIn(false);
@@ -413,15 +585,172 @@ export default function App() {
     doc.save(`SpendSense_Report_${period.replace(/ /g, '_')}.pdf`);
   };
 
-  // Helper for consistent local date strings (YYYY-MM-DD)
-  const getLocalDateString = (date: Date) => {
-    const year = date.getFullYear();
-    const month = String(date.getMonth() + 1).padStart(2, '0');
-    const day = String(date.getDate()).padStart(2, '0');
-    return `${year}-${month}-${day}`;
+  const exportSavingsPDF = (type: 'goal' | 'emergency', id?: string, name?: string) => {
+    const doc = new jsPDF() as any;
+    const title = type === 'emergency' ? 'Emergency Fund Logs' : `Goal Logs: ${name}`;
+    const filename = type === 'emergency' ? 'Defensive_Logs.pdf' : `${name?.replace(/ /g, '_')}_Mission_Logs.pdf`;
+    
+    doc.setFontSize(22);
+    doc.setTextColor(59, 130, 246); // Blue 500 for emergency or Emerald for goal
+    if (type === 'goal') doc.setTextColor(16, 185, 129);
+    
+    doc.text(title, 14, 20);
+    
+    doc.setFontSize(10);
+    doc.setTextColor(100);
+    doc.text(`Generated on: ${new Date().toLocaleString()}`, 14, 28);
+
+    const related = transactions.filter(t => t.goalId === (type === 'emergency' ? 'emergency_fund' : id));
+    
+    const total = related.reduce((s, t) => s + t.amount, 0);
+
+    autoTable(doc, {
+      startY: 35,
+      head: [['Metric', 'Value']],
+      body: [
+        ['Total Allocated', formatINR(total)],
+        ['Operation Count', related.length.toString()]
+      ],
+      theme: 'striped',
+      headStyles: { fillColor: type === 'emergency' ? [59, 130, 246] : [16, 185, 129] }
+    });
+
+    autoTable(doc, {
+      startY: (doc as any).lastAutoTable.finalY + 10,
+      head: [['Date', 'Description', 'Amount']],
+      body: related.sort((a,b) => new Date(b.date).getTime() - new Date(a.date).getTime()).map(t => [
+        new Date(t.date).toLocaleDateString(),
+        t.description.replace(`: ${name}`, '').replace(': Emergency Fund', ''),
+        formatINR(t.amount)
+      ]),
+      theme: 'grid',
+      headStyles: { fillColor: [51, 65, 85] }
+    });
+
+    doc.save(filename);
   };
 
   const [input, setInput] = useState("");
+  const [isRecording, setIsRecording] = useState(false);
+  const recognitionRef = useRef<any>(null);
+
+  const checkMicPermission = async (): Promise<boolean> => {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      stream.getTracks().forEach(track => track.stop());
+      return true;
+    } catch (err) {
+      console.error("Microphone permission check failed:", err);
+      return false;
+    }
+  };
+
+  const handleRetryMicPermission = async () => {
+    showToast("Checking microphone permission...", "success");
+    const granted = await checkMicPermission();
+    if (granted) {
+      showToast("Access granted! Activating microphone...", "success");
+      setTimeout(() => {
+        toggleRecording();
+      }, 300);
+    } else {
+      showToast("Permission still denied. Check site settings or try opening standalone.", "error");
+    }
+  };
+
+  const toggleRecording = async () => {
+    if (isRecording) {
+      recognitionRef.current?.stop();
+      setIsRecording(false);
+    } else {
+      const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
+      if (!SpeechRecognition) {
+        showToast("Browser doesn't support voice typing", "error");
+        return;
+      }
+
+      const isIframe = window.self !== window.top;
+      if (isIframe) {
+        showToast("Mic blocked in iframe preview. Click 'Open Standalone App' in chat!", "warn");
+        
+        const infoMsgText = "🎙️ **Microphone Access Blocked in Preview Mode**\n\nFor security reasons, web browsers automatically block microphone and camera access inside embedded preview frames (iframes).\n\n💡 **Simple Solution:**\nClick the **Open Standalone App** button below. This will run SpendSense in its own dedicated browser tab, which will prompt you for microphone permission and let you use voice recording smoothly! ⚡";
+        
+        const warningMsg: Message = {
+          id: generateId("bot"),
+          from: "bot",
+          text: infoMsgText,
+          timestamp: Date.now(),
+          showOpenNewTab: true
+        };
+        
+        if (user) {
+          saveMessage({ from: "bot", text: infoMsgText, timestamp: Date.now(), showOpenNewTab: true });
+        }
+        setMessages(prev => [...prev, warningMsg]);
+        return;
+      }
+
+      const hasPermission = await checkMicPermission();
+      if (!hasPermission) {
+        showToast("Microphone access denied. Check your site permissions!", "error");
+        
+        const infoMsgText = "🛡️ **Microphone permission was denied**\n\nPlease click the **Lock icon** 🔒 next to the web address in your browser url bar at the top, change Microphone to **Allow**, then try clicking the microphone button again.";
+        
+        const warningMsg: Message = {
+          id: generateId("bot"),
+          from: "bot",
+          text: infoMsgText,
+          timestamp: Date.now(),
+          showRetryMic: true
+        };
+        
+        if (user) {
+          saveMessage({ from: "bot", text: infoMsgText, timestamp: Date.now(), showRetryMic: true });
+        }
+        setMessages(prev => [...prev, warningMsg]);
+        return;
+      }
+
+      recognitionRef.current = new SpeechRecognition();
+      recognitionRef.current.continuous = false;
+      recognitionRef.current.interimResults = false;
+      recognitionRef.current.lang = 'en-IN';
+      
+      recognitionRef.current.onstart = () => setIsRecording(true);
+      recognitionRef.current.onresult = (event: any) => {
+        const transcript = event.results[0][0].transcript;
+        setInput(transcript);
+      };
+      recognitionRef.current.onerror = (e: any) => {
+        setIsRecording(false);
+        if (e.error === 'not-allowed') {
+          showToast("Microphone access denied. Please click the Lock icon in your address bar and allow microphone permissions.", "error");
+
+          const infoMsgText = "🛡️ **Microphone permission was denied**\n\nPlease click the **Lock icon** 🔒 next to the web address in your browser url bar at the top, change Microphone to **Allow**, then try clicking the microphone button again.";
+          
+          const warningMsg: Message = {
+            id: generateId("bot"),
+            from: "bot",
+            text: infoMsgText,
+            timestamp: Date.now(),
+            showRetryMic: true
+          };
+          
+          if (user) {
+            saveMessage({ from: "bot", text: infoMsgText, timestamp: Date.now(), showRetryMic: true });
+          }
+          setMessages(prev => [...prev, warningMsg]);
+        } else if (e.error === 'no-speech') {
+          showToast("No speech detected. Please try speaking again.", "warn");
+        } else {
+          showToast(`Voice Error: ${e.error}`, "error");
+        }
+      };
+      recognitionRef.current.onend = () => setIsRecording(false);
+      recognitionRef.current.start();
+    }
+  };
+
   const [itemSearchQuery, setItemSearchQuery] = useState("");
   const [selectedItemName, setSelectedItemName] = useState<string | null>(null);
 
@@ -489,7 +818,7 @@ export default function App() {
   const [reportRange, setReportRange] = useState<"daily" | "monthly" | "yearly" | "custom">("monthly");
   const [startDate, setStartDate] = useState(getLocalDateString(new Date(new Date().setDate(1))));
   const [endDate, setEndDate] = useState(getLocalDateString(new Date()));
-  const [activeTab, setActiveTab] = useState<"chat" | "stats" | "income" | "history" | "settings" | "reports">("chat");
+  const [activeTab, setActiveTab] = useState<"chat" | "stats" | "income" | "history" | "settings" | "reports" | "goals">("chat");
   const [loading, setLoading] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
   const [filterCategory, setFilterCategory] = useState("All");
@@ -500,12 +829,14 @@ export default function App() {
 
   const saveMessage = async (msg: Omit<Message, 'id'>) => {
     if (!user) return;
-    const { from, text, timestamp } = msg;
+    const { from, text, timestamp, showOpenNewTab, showRetryMic } = msg;
     try {
       await addDoc(collection(db, "users", user.uid, "messages"), {
         from,
         text,
         timestamp,
+        showOpenNewTab: showOpenNewTab || null,
+        showRetryMic: showRetryMic || null,
         userId: user.uid
       });
     } catch (error) {
@@ -551,190 +882,100 @@ export default function App() {
     setLoading(true);
 
     let result;
-    let usedAI = false;
 
     try {
-      if (isOnline) {
-        // Prepare context for the AI to answer data-related questions
-        const transactionContext = {
-          summary: {
-            totalIncome: transactions.filter(t => t.type === 'income').reduce((s, t) => s + t.amount, 0),
-            totalExpense: transactions.filter(t => t.type === 'expense').reduce((s, t) => s + t.amount, 0),
-            balance: transactions.reduce((s, t) => s + (t.type === 'income' ? t.amount : -t.amount), 0),
-            count: transactions.length
-          },
-          recent: transactions.slice(0, 15).map(t => ({
-            date: t.date.split('T')[0],
-            type: t.type,
-            amount: t.amount,
-            description: t.description,
-            category: t.category
-          })),
-          topCategories: Object.keys(CATEGORIES).map(cat => ({
-            name: cat,
-            total: transactions.filter(t => t.category === cat && t.type === 'expense').reduce((s, t) => s + t.amount, 0)
-          })).filter(c => c.total > 0).sort((a, b) => b.total - a.total).slice(0, 8)
-        };
-
-        const response = await fetch("/api/chat", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ 
-            text, 
-            current_date: new Date().toISOString(),
-            model_flavor: modelFlavor,
-            transaction_context: transactionContext
-          }),
-        });
-        
-        if (response.ok) {
-          result = await response.json();
-          usedAI = true;
-          if (result.suggestions) setSuggestions(result.suggestions);
-        } else if (response.status === 429) {
-          const errData = await response.json();
-          showToast(errData.message || "AI quota exceeded. Using local parser.", "warn");
-        }
+      // Direct call to simplified local backend parser
+      const response = await fetch("/api/chat", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ 
+          text, 
+          transaction_context: {
+            history: messages.slice(-5).map(m => ({ from: m.from, text: m.text })),
+            summary: {
+              totalIncome: transactions.filter(t => t.type === 'income' && !t.goalId).reduce((s, t) => s + t.amount, 0),
+              totalExpense: transactions.filter(t => t.type === 'expense' && !t.goalId).reduce((s, t) => s + t.amount, 0),
+              balance: transactions.filter(t => !t.goalId).reduce((s, t) => s + (t.type === 'income' ? t.amount : -t.amount), 0),
+              count: transactions.filter(t => !t.goalId).length
+            },
+            recent: transactions.filter(t => !t.goalId).slice(0, 15).map(t => ({
+              description: t.description,
+              category: t.category,
+              amount: t.amount,
+              type: t.type
+            }))
+          }
+        }),
+      });
+      
+      if (response.ok) {
+        result = await response.json();
       }
     } catch (error) {
-      console.warn("AI processing failed", error);
+      console.warn("Backend processing failed", error);
     }
 
     if (result && result.intent === "advice") {
       const botMsg: Omit<Message, 'id'> = {
         from: "bot",
         timestamp: Date.now(),
-        text: result.reply || "I'm not sure about that."
+        text: result.reply || "I'm not sure how to help with that."
       };
       if (user) {
         saveMessage(botMsg);
       } else {
         setMessages(prev => [...prev, { ...botMsg, id: generateId("bot") }]);
       }
-    } else if (result && result.intent === "search") {
-      let { category, start_date, end_date, aggregation, language } = result.search;
-      
-      // Validate dates or default to today if AI failed
-      const now = new Date();
-      const todayStr = now.toISOString().split('T')[0];
-      
-      if (!start_date || isNaN(Date.parse(start_date))) start_date = todayStr;
-      if (!end_date || isNaN(Date.parse(end_date))) end_date = todayStr;
-
-      const start = new Date(start_date);
-      start.setHours(0, 0, 0, 0);
-      const end = new Date(end_date);
-      end.setHours(23, 59, 59, 999);
-      
-      const filtered = transactions.filter(t => {
-        const d = new Date(t.date);
-        const matchDate = d >= start && d <= end;
-        if (!matchDate) return false;
-        if (category && t.category.toLowerCase() !== category.toLowerCase()) return false;
-        return true;
-      });
-
-      const total = filtered.reduce((s, t) => s + (t.type === 'expense' ? t.amount : 0), 0);
-      const incomeTotal = filtered.reduce((s, t) => s + (t.type === 'income' ? t.amount : 0), 0);
-      
-      // Readable period string
-      let periodStr = "";
-      if (start_date === end_date) {
-        periodStr = start_date === todayStr ? "Today" : formatDate(start_date);
-      } else {
-        periodStr = `${formatDate(start_date)} - ${formatDate(end_date)}`;
-      }
-
-      let botResponse = "";
-      if (aggregation === 'sum') {
-        const catText = category ? `on *${category}*` : 'in total';
-        if (language === 'hi') {
-          botResponse = `आपने **${periodStr}** में ${category || 'कुल'} पर **${formatINR(total)}** खर्च किए।`;
-        } else if (language === 'as') {
-          botResponse = `আপুনি **${periodStr}** ত ${category || 'মুঠতে'} **${formatINR(total)}** খৰচ কৰিছে।`;
-        } else {
-          botResponse = `You spent **${formatINR(total)}** ${catText} during **${periodStr}**.`;
-        }
-      } else if (aggregation === 'average') {
-        const avg = filtered.length ? total / filtered.length : 0;
-        botResponse = `Your average spending ${category ? `on *${category}*` : ''} for this period was **${formatINR(avg)}** per transaction.`;
-      } else {
-        const list = filtered.slice(0, 15).map(t => {
-          const d = new Date(t.date);
-          return `${d.getDate()} ${d.toLocaleDateString('en-IN', { month: 'short' })} – **${formatINR(t.amount)}** – ${t.category}`;
-        }).join('\n');
-        
-        const header = language === 'hi' ? `**${periodStr} के खर्चे:**` : language === 'as' ? `**${periodStr}ৰ খৰচ:**` : `**${periodStr} Expenses:**`;
-        botResponse = `${header}\n\n${list || '_No expenses found_'}\n\n**Total: ${formatINR(total)}**`;
-      }
-
-      const botMsg: Omit<Message, 'id'> = {
-        from: "bot",
-        timestamp: Date.now(),
-        text: botResponse
-      };
+    } else if (result && result.intent === "entry" && result.entry) {
+      const data = result.entry;
+      const verb = data.type === 'income' ? 'earned' : 'spent';
+      const cat = CATEGORIES[data.category] || CATEGORIES.Other;
+      const msgText = `${cat.icon} **${data.category}** noted! You ${verb} **${formatINR(data.amount)}** on *${data.description}*.\n\n💡 Tip: ${data.tip}`;
 
       if (user) {
-        saveMessage(botMsg);
-      } else {
-        setMessages(prev => [...prev, { ...botMsg, id: generateId("bot") }]);
-      }
-    } else {
-      // Handle entry (either from AI or fallback)
-      let data = (result && result.intent === 'entry') ? result.entry : null;
-      
-      if (!data) {
-        data = fallbackParseTransaction(text);
-      }
-
-      if (data && data.amount) {
-        const verb = data.type === 'income' ? 'earned' : 'spent';
-        const cat = CATEGORIES[data.category] || CATEGORIES.Other;
-        const msgText = `${cat.icon} **${data.category}** noted! You ${verb} **${formatINR(data.amount)}** on *${data.description}*.\n\n${usedAI ? '💡 Tip: ' + data.tip : '⚡ (Local Parser used)'}`;
-
-        if (user) {
-          try {
-            await addDoc(collection(db, "users", user.uid, "transactions"), {
-              userId: user.uid,
-              type: data.type,
-              amount: data.amount,
-              description: data.description,
-              category: data.category,
-              date: new Date().toISOString()
-            });
-            await saveMessage({ from: "bot", timestamp: Date.now(), text: msgText });
-          } catch (error) {
-            handleFirestoreError(error, OperationType.CREATE, `users/${user.uid}/transactions`);
-          }
-        } else {
-          const newTransaction: Transaction = {
-            id: generateId("txn"),
+        try {
+          await addDoc(collection(db, "users", user.uid, "transactions"), {
+            userId: user.uid,
             type: data.type,
             amount: data.amount,
             description: data.description,
             category: data.category,
             date: new Date().toISOString()
-          };
-          setTransactions(prev => [newTransaction, ...prev]);
-          setMessages(prev => [...prev, {
-            id: generateId("bot"),
-            from: "bot",
-            timestamp: Date.now(),
-            text: msgText
-          }]);
+          });
+          if (data.category !== "Savings") {
+            await saveMessage({ from: "bot", timestamp: Date.now(), text: msgText });
+          }
+        } catch (error) {
+          handleFirestoreError(error, OperationType.CREATE, `users/${user.uid}/transactions`);
         }
-        showToast(`Added ${formatINR(data.amount)} ${data.type}`);
       } else {
-        const botMsg: Omit<Message, 'id'> = {
+        const newTransaction: Transaction = {
+          id: generateId("txn"),
+          type: data.type,
+          amount: data.amount,
+          description: data.description,
+          category: data.category,
+          date: new Date().toISOString()
+        };
+        setTransactions(prev => [newTransaction, ...prev]);
+        setMessages(prev => [...prev, {
+          id: generateId("bot"),
           from: "bot",
           timestamp: Date.now(),
-          text: "I couldn't understand that. You can try:\n- **Spent 500 on dinner**\n- **How much did I spend on food?**\n- **Show January expenses**"
-        };
-        if (user) {
-          saveMessage(botMsg);
-        } else {
-          setMessages(prev => [...prev, { ...botMsg, id: generateId("bot") }]);
-        }
+          text: msgText
+        }]);
+      }
+      showToast(`Added ${formatINR(data.amount)} ${data.type}`);
+    } else {
+      const botMsg: Omit<Message, 'id'> = {
+        from: "bot",
+        timestamp: Date.now(),
+        text: "I couldn't quite understand that. Try something like 'Spent 500 for food'."
+      };
+      if (user) {
+        saveMessage(botMsg);
+      } else {
+        setMessages(prev => [...prev, { ...botMsg, id: generateId("bot") }]);
       }
     }
     
@@ -742,16 +983,51 @@ export default function App() {
   };
 
   const deleteTransaction = async (id: string) => {
+    // We need the tx details to know what to adjust, but finding it from stale closure might be okay for a single click
+    const txToDelete = transactions.find(t => t.id === id);
+    if (!txToDelete) return;
+
+    // Optimistic UI updates
+    setTransactions(prev => prev.filter(t => t.id !== id));
+    
+    if (txToDelete.goalId) {
+      if (txToDelete.goalId === 'emergency_fund') {
+        const adjustment = txToDelete.type === 'expense' ? -txToDelete.amount : txToDelete.amount;
+        setEmergencyFund(prev => {
+          const newVal = Math.max(0, prev + adjustment);
+          if (user) {
+            setDoc(doc(db, "users", user.uid, "config", "main"), { emergencyFund: newVal }, { merge: true })
+              .catch(err => handleFirestoreError(err, OperationType.UPDATE, `users/${user.uid}/config/main`));
+          }
+          return newVal;
+        });
+      } else {
+        const adjustment = txToDelete.type === 'expense' ? -txToDelete.amount : txToDelete.amount;
+        setGoals(prev => {
+          const updated = prev.map(g => g.id === txToDelete.goalId ? {
+            ...g,
+            current: Math.max(0, (g.current || 0) + adjustment),
+            updatedAt: new Date().toISOString()
+          } : g);
+          if (user) {
+            setDoc(doc(db, "users", user.uid, "config", "main"), { goals: updated }, { merge: true })
+              .catch(err => handleFirestoreError(err, OperationType.UPDATE, `users/${user.uid}/config/main`));
+          }
+          return updated;
+        });
+      }
+    }
+
     if (user) {
       try {
         await deleteDoc(doc(db, "users", user.uid, "transactions", id));
       } catch (error) {
         handleFirestoreError(error, OperationType.DELETE, `users/${user.uid}/transactions/${id}`);
+        showToast("Cloud sync failed", "error");
       }
-    } else {
-      setTransactions(prev => prev.filter(t => t.id !== id));
     }
-    showToast("Transaction deleted", "warn");
+    
+    showToast("Log entry purged", "warn");
   };
 
   const exportData = async () => {
@@ -1074,6 +1350,15 @@ export default function App() {
             </div>
           </div>
           <div className="flex items-center gap-3">
+            {!user && window.self !== window.top && (
+              <button 
+                onClick={openInNewTab}
+                className="hidden sm:flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-blue-500/10 text-blue-400 border border-blue-500/20 text-[10px] font-black uppercase tracking-widest hover:bg-blue-500/20 transition-all"
+              >
+                <ExternalLink size={12} />
+                Open in tab
+              </button>
+            )}
             {user ? (
                <button onClick={logout} className="p-2 rounded-full bg-black/20 text-emerald-100 hover:bg-black/40 transition-colors">
                 <LogOut size={16} />
@@ -1106,6 +1391,7 @@ export default function App() {
           { id: 'stats', label: 'Stats', icon: <PieChartIcon size={16} /> },
           { id: 'reports', label: 'Report', icon: <BarChart3 size={16} /> },
           { id: 'income', label: 'In', icon: <ArrowUpCircle size={16} /> },
+          { id: 'goals', label: 'Goals', icon: <Target size={16} /> },
           { id: 'history', label: 'Logs', icon: <History size={16} /> }
         ].map(tab => (
           <button
@@ -1126,7 +1412,7 @@ export default function App() {
         
         {/* Chat Section */}
         <AnimatePresence mode="wait">
-          {activeTab === "chat" && (
+           {activeTab === "chat" && (
             <motion.div 
               key="chat"
               initial={{ x: -20, opacity: 0 }}
@@ -1157,6 +1443,33 @@ export default function App() {
                           );
                         })}
                       </div>
+                      
+                      {msg.showOpenNewTab && (
+                        <div className="mt-3 pt-3 border-t border-slate-700/50 flex flex-col gap-2">
+                          <a
+                            href={window.location.href}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="inline-flex items-center justify-center gap-2 px-4 py-2 bg-gradient-to-r from-emerald-500 to-teal-500 hover:from-emerald-600 hover:to-teal-600 text-white font-bold text-xs rounded-xl shadow-md cursor-pointer transition-all hover:scale-[1.02] active:scale-95 text-center decoration-transparent"
+                          >
+                            <ExternalLink size={13} />
+                            Open Standalone App
+                          </a>
+                        </div>
+                      )}
+
+                      {msg.showRetryMic && (
+                        <div className="mt-3 pt-3 border-t border-slate-700/50 flex flex-col gap-2">
+                          <button
+                            onClick={handleRetryMicPermission}
+                            className="inline-flex items-center justify-center gap-2 px-4 py-2 bg-gradient-to-r from-rose-500 to-red-600 hover:from-rose-600 hover:to-red-700 text-white font-bold text-xs rounded-xl shadow-md cursor-pointer transition-all hover:scale-[1.02] active:scale-95 text-center"
+                          >
+                            <Mic size={13} />
+                            Click here to retry voice permissions
+                          </button>
+                        </div>
+                      )}
+
                       <div className={`text-[9px] mt-1.5 opacity-60 flex ${msg.from === 'user' ? 'justify-end' : 'justify-start'}`}>
                         {formatTime(msg.timestamp)}
                       </div>
@@ -1210,13 +1523,24 @@ export default function App() {
               )}
 
               {/* Chat Input */}
-              <div className="p-4 bg-slate-900 border-t border-slate-800 flex gap-2">
+              <div className="p-4 bg-slate-900 border-t border-slate-800 flex gap-2 items-center">
+                <button
+                  onClick={toggleRecording}
+                  className={`w-11 h-11 rounded-full flex items-center justify-center transition-all ${
+                    isRecording 
+                    ? 'bg-rose-500 text-white animate-pulse shadow-lg shadow-rose-500/20' 
+                    : 'bg-slate-800 text-slate-400 hover:text-white'
+                  }`}
+                  title={isRecording ? "Stop Recording" : "Voice Message"}
+                >
+                  {isRecording ? <MicOff size={18} /> : <Mic size={18} />}
+                </button>
                 <input
                   type="text"
                   value={input}
                   onChange={(e) => setInput(e.target.value)}
                   onKeyDown={(e) => e.key === 'Enter' && handleSend()}
-                  placeholder="e.g. Spent 500 on coffee"
+                  placeholder={isRecording ? "Listening..." : "e.g. Spent 500 on coffee"}
                   className="flex-1 bg-slate-800 border-none rounded-full px-5 py-3 text-sm focus:ring-2 focus:ring-emerald-500/50 outline-none transition-all placeholder:text-slate-600"
                 />
                 <button
@@ -1586,10 +1910,6 @@ export default function App() {
               {/* Stats Section Header */}
               <div className="flex justify-between items-center px-1">
                 <h2 className="text-xl font-black text-white">Analysis</h2>
-                <div className={`flex items-center gap-1.5 px-3 py-1 rounded-full border ${isOnline ? 'bg-emerald-500/10 border-emerald-500/20 text-emerald-400' : 'bg-amber-500/10 border-amber-500/20 text-amber-400'}`}>
-                  <div className={`w-1.5 h-1.5 rounded-full ${isOnline ? 'bg-emerald-400 animate-pulse' : 'bg-amber-400'}`} />
-                  <span className="text-[9px] font-black uppercase tracking-widest">{isOnline ? 'AI Live' : 'Local'}</span>
-                </div>
               </div>
 
               {/* Type and Timeframe Selectors */}
@@ -1681,9 +2001,11 @@ export default function App() {
               {/* Balance & Distribution Card */}
               <div className="bg-gradient-to-br from-slate-900 to-slate-800 border border-slate-800 p-6 rounded-3xl shadow-xl relative overflow-hidden">
                 <div className="relative z-10">
-                  <h3 className="text-[10px] font-black uppercase tracking-widest text-emerald-400/60 mb-1">
-                    Net Balance ({statsTimeframe})
-                  </h3>
+                  <div className="flex justify-between items-start mb-1">
+                    <h3 className="text-[10px] font-black uppercase tracking-widest text-emerald-400/60">
+                      Net Balance ({statsTimeframe})
+                    </h3>
+                  </div>
                   <p className={`text-3xl font-black ${reportStats.income - reportStats.expense >= 0 ? 'text-white' : 'text-rose-400'}`}>
                     {reportStats.income - reportStats.expense < 0 ? '-' : ''}{formatINR(Math.abs(reportStats.income - reportStats.expense))}
                   </p>
@@ -1700,7 +2022,7 @@ export default function App() {
                       )}
                     </div>
                     <div className="w-px bg-slate-700/50" />
-                    <div className="flex-1 relative">
+                    <div className="flex-1 relative border-r border-slate-700/50 pr-4">
                       <div className="flex items-center gap-1.5 text-rose-400 mb-0.5">
                         <ArrowDownCircle size={10} />
                         <span className="text-[9px] font-black uppercase tracking-widest">Spend</span>
@@ -1710,6 +2032,15 @@ export default function App() {
                         <div className="absolute top-0 right-0 w-1 h-1 bg-rose-500 rounded-full animate-pulse shadow-[0_0_8px_rgba(244,63,94,0.8)]" />
                       )}
                     </div>
+                    <div className="flex-1 relative pl-2 group cursor-pointer" onClick={() => setActiveTab('settings')}>
+                       <div className="flex items-center gap-1.5 text-slate-400 mb-0.5 group-hover:text-emerald-400 transition-colors">
+                        <PieChartIcon size={10} />
+                        <span className="text-[9px] font-black uppercase tracking-widest">Total Budgeted</span>
+                      </div>
+                      <p className="text-base font-black text-slate-300 group-hover:text-white transition-colors">
+                        {formatINR((Object.values(categoryBudgets) as number[]).reduce((a, b: number) => a + (b || 0), 0))}
+                      </p>
+                    </div>
                   </div>
                 </div>
                 <div className="absolute top-[-20%] right-[-10%] w-32 h-32 bg-emerald-500/5 rounded-full blur-3xl" />
@@ -1718,35 +2049,109 @@ export default function App() {
               {/* Category Breakdown with Progress Bars */}
               {statsType !== 'income' && (
                 <div className="space-y-3">
-                  <h3 className="text-[10px] font-black uppercase tracking-widest text-slate-500 px-2 mt-4">Budget Utilization ({statsTimeframe})</h3>
-                  {categoryData.filter(c => c.budget > 0).map(c => {
-                    // Re-calculate the specific current view spend for this category to show in bar
-                    const currentViewCatTotal = reportTransactions.filter(t => t.type === 'expense' && t.category === c.name).reduce((sum, t) => sum + t.amount, 0);
-                    const pct = Math.min(100, (currentViewCatTotal / c.budget) * 100);
-                    
-                    return (
-                      <div key={c.name} className="bg-slate-900/40 border border-slate-800/40 p-4 rounded-2xl">
-                        <div className="flex justify-between items-center mb-2">
-                          <div className="flex items-center gap-2">
-                            <span className="text-lg">{c.icon}</span>
-                            <span className="text-xs font-bold">{c.name}</span>
+                  <div className="flex justify-between items-end px-2 mt-4">
+                    <h3 className="text-[10px] font-black uppercase tracking-widest text-slate-500">Budget Utilization</h3>
+                    <div className="text-right">
+                      <p className="text-[8px] font-black uppercase text-slate-500 tracking-widest">Total Monthly Budget</p>
+                      <p className="text-xs font-black text-white">{formatINR((Object.values(categoryBudgets) as number[]).reduce((a, b: number) => a + (b || 0), 0))}</p>
+                    </div>
+                  </div>
+                  {(() => {
+                    const totalMonthlyBudget = (Object.values(categoryBudgets) as number[]).reduce((a, b: number) => a + (b || 0), 0);
+                    return categoryData.filter(c => c.budget > 0).map(c => {
+                      // Re-calculate the specific current view spend for this category to show in bar
+                      const currentViewCatTotal = reportTransactions.filter(t => t.type === 'expense' && t.category === c.name).reduce((sum, t) => sum + t.amount, 0);
+                      const pct = Math.min(100, (currentViewCatTotal / c.budget) * 100);
+                      const budgetOfTotalPct = totalMonthlyBudget > 0 ? (c.budget / totalMonthlyBudget) * 100 : 0;
+                      
+                      return (
+                        <div key={c.name} className="bg-slate-900/40 border border-slate-800/40 p-4 rounded-2xl relative overflow-hidden group">
+                          <div className="flex justify-between items-center mb-3">
+                            <div className="flex items-center gap-3">
+                              <div className="w-8 h-8 rounded-xl flex items-center justify-center text-lg bg-slate-950/50" style={{ color: c.color }}>
+                                {c.icon}
+                              </div>
+                              <div>
+                                 <span className="text-xs font-bold block">{c.name}</span>
+                                 <div className="flex items-center gap-1.5 mt-0.5">
+                                   <span className="text-[10px] text-emerald-400 font-bold uppercase tracking-tight">{pct.toFixed(0)}% Utilized</span>
+                                   <div className="w-1 h-1 rounded-full bg-slate-700" />
+                                   <span className="text-[10px] text-slate-500 font-bold uppercase tracking-tight">{budgetOfTotalPct.toFixed(1)}% of total budget</span>
+                                 </div>
+                              </div>
+                            </div>
+                            <div className="text-right flex items-center gap-2">
+                               {editingBudgetCat === c.name ? (
+                                 <div className="flex items-center gap-1 animate-in zoom-in-95">
+                                   <input 
+                                     type="number"
+                                     autoFocus
+                                     value={budgetEditValue}
+                                     onChange={(e) => setBudgetEditValue(e.target.value)}
+                                     onBlur={() => {
+                                        const val = parseInt(budgetEditValue) || 0;
+                                        if (val !== c.budget) {
+                                          const updated = { ...categoryBudgets, [c.name]: val };
+                                          setCategoryBudgets(updated);
+                                          if (user) {
+                                            setDoc(doc(db, "users", user.uid, "config", "main"), { categoryBudgets: updated }, { merge: true });
+                                          }
+                                          showToast(`Budget for ${c.name} updated!`);
+                                        }
+                                        setEditingBudgetCat(null);
+                                     }}
+                                     onKeyDown={(e) => {
+                                       if (e.key === 'Enter') {
+                                         (e.target as HTMLInputElement).blur();
+                                       } else if (e.key === 'Escape') {
+                                         setBudgetEditValue(c.budget.toString());
+                                         setEditingBudgetCat(null);
+                                       }
+                                     }}
+                                     className="w-20 bg-slate-950 border border-emerald-500/50 rounded px-2 py-1 text-[10px] font-black text-white outline-none"
+                                   />
+                                 </div>
+                               ) : (
+                                 <button 
+                                   onClick={(e) => {
+                                     e.stopPropagation();
+                                     setEditingBudgetCat(c.name);
+                                     setBudgetEditValue(c.budget.toString());
+                                   }}
+                                   className="text-right flex items-center gap-2 hover:bg-emerald-500/10 p-1 rounded-lg transition-all border border-transparent hover:border-emerald-500/20"
+                                 >
+                                   <div>
+                                     <div className="flex items-center justify-end gap-1.5 mb-0.5">
+                                        <span className="text-xs font-black text-white block">{formatINR(currentViewCatTotal)}</span>
+                                        <span className={`text-[8px] font-black px-1 rounded ${pct > 100 ? 'bg-rose-500/20 text-rose-400' : 'bg-emerald-400/20 text-emerald-400'}`}>
+                                          {pct.toFixed(0)}%
+                                        </span>
+                                     </div>
+                                     <span className="text-[9px] text-slate-500 font-bold uppercase tracking-widest flex items-center gap-1 justify-end">
+                                       Limit: {formatINR(c.budget)}
+                                       <Edit2 size={8} className="text-emerald-400" />
+                                     </span>
+                                   </div>
+                                 </button>
+                               )}
+                            </div>
                           </div>
-                          <span className="text-xs font-black text-slate-300">
-                            {formatINR(currentViewCatTotal)} <span className="text-slate-600 font-normal">/ {formatINR(c.budget)}</span>
-                          </span>
+                          <div className="h-1.5 w-full bg-slate-800 rounded-full overflow-hidden">
+                            <div 
+                              className="h-full rounded-full transition-all duration-1000 ease-in-out" 
+                              style={{ 
+                                width: `${pct}%`, 
+                                backgroundColor: pct > 98 ? C.danger : pct > 80 ? C.warn : C.accent 
+                              }} 
+                            />
+                          </div>
+                          {pct > 95 && (
+                            <div className="absolute top-0 right-0 w-1 h-full bg-rose-500/30 blur-[2px]" />
+                          )}
                         </div>
-                        <div className="h-1 w-full bg-slate-800 rounded-full overflow-hidden">
-                          <div 
-                            className="h-full rounded-full transition-all duration-1000" 
-                            style={{ 
-                              width: `${pct}%`, 
-                              backgroundColor: pct > 90 ? C.danger : pct > 70 ? C.warn : c.color 
-                            }} 
-                          />
-                        </div>
-                      </div>
-                    );
-                  })}
+                      );
+                    });
+                  })()}
                 </div>
               )}
 
@@ -1770,6 +2175,8 @@ export default function App() {
                   </div>
                 </div>
               )}
+
+
 
               {/* Month-wise History Summary */}
               <div className="space-y-3 pb-8">
@@ -1848,13 +2255,75 @@ export default function App() {
                     <p className="text-xl font-black text-emerald-400">{formatINR(monthInc)}</p>
                   </div>
                    <button 
-                    onClick={() => setActiveTab('chat')}
-                    className="p-4 rounded-2xl bg-emerald-500 text-slate-900 flex flex-col items-center justify-center gap-1 active:scale-95 transition-transform"
+                    onClick={() => setShowIncomeForm(!showIncomeForm)}
+                    className={`p-4 rounded-2xl flex flex-col items-center justify-center gap-1 active:scale-95 transition-transform ${showIncomeForm ? 'bg-slate-800 text-white border border-slate-700' : 'bg-emerald-500 text-slate-900'}`}
                   >
-                    <PlusCircle size={20} />
-                    <span className="text-[10px] font-black uppercase">Add Income</span>
+                    {showIncomeForm ? <X size={20} /> : <PlusCircle size={20} />}
+                    <span className="text-[10px] font-black uppercase">{showIncomeForm ? 'Close Form' : 'Add Income'}</span>
                   </button>
                 </div>
+                
+                {showIncomeForm && (
+                  <motion.form 
+                    initial={{ height: 0, opacity: 0 }}
+                    animate={{ height: "auto", opacity: 1 }}
+                    onSubmit={handleManualIncome}
+                    className="mt-6 space-y-4 bg-slate-900/40 p-4 rounded-2xl border border-emerald-500/20"
+                  >
+                    <div className="space-y-3">
+                      <div>
+                        <label className="text-[9px] font-black uppercase text-slate-500 block mb-1 px-1">Description</label>
+                        <input 
+                          required
+                          value={incomeFormData.description}
+                          onChange={e => setIncomeFormData({...incomeFormData, description: e.target.value})}
+                          placeholder="e.g. Monthly Salary, Bonus..."
+                          className="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-2.5 text-xs focus:border-emerald-500/50 outline-none transition-colors"
+                        />
+                      </div>
+                      <div className="grid grid-cols-2 gap-3">
+                        <div>
+                          <label className="text-[9px] font-black uppercase text-slate-500 block mb-1 px-1">Amount (₹)</label>
+                          <input 
+                            required
+                            type="number"
+                            value={incomeFormData.amount}
+                            onChange={e => setIncomeFormData({...incomeFormData, amount: e.target.value})}
+                            placeholder="0.00"
+                            className="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-2.5 text-xs focus:border-emerald-500/50 outline-none transition-colors"
+                          />
+                        </div>
+                        <div>
+                          <label className="text-[9px] font-black uppercase text-slate-500 block mb-1 px-1">Category</label>
+                          <select 
+                            value={incomeFormData.category}
+                            onChange={e => setIncomeFormData({...incomeFormData, category: e.target.value})}
+                            className="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-2.5 text-xs focus:border-emerald-500/50 outline-none transition-colors appearance-none"
+                          >
+                            {['Salary', 'Business', 'Freelance', 'Investment', 'Gift', 'Other'].map(cat => (
+                              <option key={cat} value={cat}>{cat}</option>
+                            ))}
+                          </select>
+                        </div>
+                      </div>
+                      <div>
+                        <label className="text-[9px] font-black uppercase text-slate-500 block mb-1 px-1">Date</label>
+                        <input 
+                          type="date"
+                          value={incomeFormData.date}
+                          onChange={e => setIncomeFormData({...incomeFormData, date: e.target.value})}
+                          className="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-2.5 text-xs focus:border-emerald-500/50 outline-none transition-colors"
+                        />
+                      </div>
+                    </div>
+                    <button 
+                      type="submit"
+                      className="w-full py-3 bg-emerald-500 text-slate-950 font-black text-xs rounded-xl shadow-[0_4px_12px_rgba(16,185,129,0.3)] hover:scale-[1.02] active:scale-95 transition-all"
+                    >
+                      Confirm Deposit
+                    </button>
+                  </motion.form>
+                )}
               </div>
 
               <div className="flex-1 overflow-y-auto p-4 space-y-3">
@@ -1931,38 +2400,122 @@ export default function App() {
                   filteredTransactions.map((transaction) => {
                     const cat = CATEGORIES[transaction.category] || CATEGORIES.Other;
                     const isIncome = transaction.type === 'income';
+                    const isEditing = editingTxId === transaction.id;
+                    
                     return (
-                      <motion.button 
+                      <motion.div 
                         layout
                         key={transaction.id} 
-                        onClick={() => setSelectedItemName(transaction.description)}
-                        className="w-full bg-slate-900 border border-slate-800 p-3 rounded-2xl flex items-center gap-3 active:scale-[0.98] hover:bg-slate-800/50 transition-all text-left"
+                        className={`w-full bg-slate-900 border ${isEditing ? 'border-emerald-500/50 shadow-lg shadow-emerald-500/5' : 'border-slate-800'} p-3 rounded-2xl transition-all`}
                       >
-                        <div 
-                          className="w-10 h-10 rounded-full flex items-center justify-center text-lg flex-shrink-0"
-                          style={{ backgroundColor: isIncome ? `${C.income}20` : `${cat.color}20`, color: isIncome ? C.income : cat.color }}
-                        >
-                          {isIncome ? <Plus size={18} /> : cat.icon}
-                        </div>
-                        <div className="flex-1 min-w-0">
-                          <h4 className="text-sm font-bold truncate text-slate-100">{transaction.description}</h4>
-                          <p className="text-[10px] text-slate-500 font-bold uppercase tracking-widest">{transaction.category} • {formatDate(transaction.date)}</p>
-                        </div>
-                        <div className="text-right flex flex-col items-end gap-1">
-                          <p className={`text-sm font-black ${isIncome ? 'text-emerald-400' : 'text-rose-400'}`}>
-                            {isIncome ? '+' : '-'}{formatINR(transaction.amount)}
-                          </p>
-                          <div 
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              deleteTransaction(transaction.id);
-                            }}
-                            className="p-1 text-rose-500 hover:bg-rose-500/10 rounded-md transition-colors"
-                          >
-                            <Trash2 size={12} />
+                        {isEditing ? (
+                          <div className="space-y-3">
+                            <div className="grid grid-cols-2 gap-2">
+                              <div className="space-y-1">
+                                <label className="text-[8px] font-black uppercase text-slate-500 tracking-widest pl-1">Amount</label>
+                                <div className="relative">
+                                  <span className="absolute left-3 top-1/2 -translate-y-1/2 text-xs text-slate-500 font-bold">₹</span>
+                                  <input 
+                                    type="number" 
+                                    value={editForm.amount || ""} 
+                                    onChange={e => setEditForm({ ...editForm, amount: parseInt(e.target.value) || 0 })}
+                                    className="w-full bg-slate-950 border border-slate-800 rounded-lg pl-6 pr-3 py-2 text-xs text-white font-bold outline-none focus:border-emerald-500"
+                                  />
+                                </div>
+                              </div>
+                              <div className="space-y-1">
+                                <label className="text-[8px] font-black uppercase text-slate-500 tracking-widest pl-1">Category</label>
+                                <select 
+                                  value={editForm.category || ""} 
+                                  onChange={e => setEditForm({ ...editForm, category: e.target.value })}
+                                  className="w-full bg-slate-950 border border-slate-800 rounded-lg px-2 py-2 text-xs text-white font-bold outline-none focus:border-emerald-500"
+                                >
+                                  {Object.keys(CATEGORIES).map(c => <option key={c} value={c}>{c}</option>)}
+                                </select>
+                              </div>
+                            </div>
+                            <div className="space-y-1">
+                              <label className="text-[8px] font-black uppercase text-slate-500 tracking-widest pl-1">Description</label>
+                              <input 
+                                type="text" 
+                                value={editForm.description || ""} 
+                                onChange={e => setEditForm({ ...editForm, description: e.target.value })}
+                                className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-xs text-white font-bold outline-none focus:border-emerald-500"
+                                placeholder="Log description"
+                              />
+                            </div>
+                            <div className="space-y-1">
+                              <label className="text-[8px] font-black uppercase text-slate-500 tracking-widest pl-1">Date</label>
+                              <input 
+                                type="date" 
+                                value={editForm.date ? editForm.date.split('T')[0] : ""} 
+                                onChange={e => setEditForm({ ...editForm, date: new Date(e.target.value).toISOString() })}
+                                className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-xs text-white font-bold outline-none focus:border-emerald-500"
+                              />
+                            </div>
+                            <div className="flex gap-2 pt-1">
+                              <button 
+                                onClick={saveEdit}
+                                className="flex-1 bg-emerald-500 text-white font-black uppercase tracking-widest text-[9px] py-2.5 rounded-xl hover:bg-emerald-600 transition-all flex items-center justify-center gap-1.5"
+                              >
+                                <Check size={12} /> Save Changes
+                              </button>
+                              <button 
+                                onClick={() => setEditingTxId(null)}
+                                className="px-4 bg-slate-800 text-slate-400 font-black uppercase tracking-widest text-[9px] py-2.5 rounded-xl hover:bg-slate-700 transition-all"
+                              >
+                                Cancel
+                              </button>
+                            </div>
                           </div>
-                        </div>
-                      </motion.button>
+                        ) : (
+                          <div className="flex items-center gap-3">
+                            <div 
+                              className="w-10 h-10 rounded-full flex items-center justify-center text-lg flex-shrink-0"
+                              style={{ backgroundColor: isIncome ? `${C.income}20` : `${cat.color}20`, color: isIncome ? C.income : cat.color }}
+                            >
+                              {isIncome ? <Plus size={18} /> : cat.icon}
+                            </div>
+                            <div className="flex-1 min-w-0" onClick={() => setSelectedItemName(transaction.description)}>
+                              <div className="flex items-center gap-2">
+                                <h4 className="text-sm font-bold truncate text-slate-100">{transaction.description}</h4>
+                                {transaction.category === "Savings" && (
+                                  <span className="px-1.5 py-0.5 bg-rose-500/10 text-rose-400 text-[7px] font-black uppercase rounded border border-rose-500/20 whitespace-nowrap">
+                                    Funds Committed
+                                  </span>
+                                )}
+                              </div>
+                              <p className="text-[10px] text-slate-500 font-bold uppercase tracking-widest">{transaction.category} • {formatDate(transaction.date)}</p>
+                            </div>
+                            <div className="text-right flex flex-col items-end gap-1">
+                              <p className={`text-sm font-black ${isIncome ? 'text-emerald-400' : 'text-rose-400'}`}>
+                                {isIncome ? '+' : '-'}{formatINR(transaction.amount)}
+                              </p>
+                              <div className="flex gap-1.5">
+                                <button 
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    setEditingTxId(transaction.id);
+                                    setEditForm(transaction);
+                                  }}
+                                  className="p-1.5 bg-slate-950/50 text-slate-500 hover:text-emerald-400 rounded-lg border border-slate-800 transition-all"
+                                >
+                                  <Edit2 size={12} />
+                                </button>
+                                <button 
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    deleteTransaction(transaction.id);
+                                  }}
+                                  className="p-1.5 bg-slate-950/50 text-slate-500 hover:text-rose-500 rounded-lg border border-slate-800 transition-all"
+                                >
+                                  <Trash2 size={12} />
+                                </button>
+                              </div>
+                            </div>
+                          </div>
+                        )}
+                      </motion.div>
                     );
                   })
                 ) : (
@@ -1971,6 +2524,925 @@ export default function App() {
                     <p className="text-sm font-bold uppercase tracking-widest opacity-40">No Logs Found</p>
                   </div>
                 )}
+              </div>
+            </motion.div>
+          )}
+
+          {activeTab === "goals" && (
+            <motion.div 
+              key="goals"
+              initial={{ x: -20, opacity: 0 }}
+              animate={{ x: 0, opacity: 1 }}
+              exit={{ x: 20, opacity: 0 }}
+              className="h-full overflow-y-auto p-4 space-y-4 bg-slate-950/20"
+            >
+              <div className="flex justify-between items-center px-1">
+                <div>
+                  <h2 className="text-xl font-black text-white italic">Goal Forge</h2>
+                  <p className="text-[10px] text-emerald-400 font-bold uppercase tracking-widest">Master your destiny</p>
+                </div>
+                <div className="flex gap-2">
+                  {emergencyFundTarget <= 0 && (
+                    <button 
+                      onClick={async () => {
+                        const defaultTarget = 150000;
+                        setEmergencyFundTarget(defaultTarget);
+                        if (user) await setDoc(doc(db, "users", user.uid, "config", "main"), { emergencyFundTarget: defaultTarget }, { merge: true });
+                        showToast("Shield Protocol Initiated", "success");
+                      }}
+                      className="bg-blue-600 hover:bg-blue-500 text-white text-[10px] font-black px-4 py-2 rounded-full shadow-[0_0_20px_rgba(59,130,246,0.3)] transition-all flex items-center gap-2"
+                    >
+                      <Shield size={14} /> Establish Shield
+                    </button>
+                  )}
+                  <button 
+                    onClick={() => {
+                      setEditingGoalId(null);
+                      setGoalFormData({ name: "", target: "", targetDate: "", allocatedPercentage: 20 });
+                      setShowGoalForm(true);
+                    }}
+                    className="bg-emerald-500 hover:bg-emerald-400 text-slate-900 text-[10px] font-black px-4 py-2 rounded-full shadow-[0_0_20px_rgba(16,185,129,0.3)] transition-all flex items-center gap-2"
+                  >
+                    <PlusCircle size={14} /> Create New Goal
+                  </button>
+                </div>
+              </div>
+
+              {/* Goal Form Modal */}
+              <AnimatePresence>
+                {showGoalForm && (
+                  <motion.div 
+                    initial={{ opacity: 0 }}
+                    animate={{ opacity: 1 }}
+                    exit={{ opacity: 0 }}
+                    className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm"
+                  >
+                    <motion.div 
+                      initial={{ scale: 0.9, y: 20 }}
+                      animate={{ scale: 1, y: 0 }}
+                      exit={{ scale: 0.9, y: 20 }}
+                      className="bg-slate-900 border border-slate-800 rounded-[32px] w-full max-w-sm overflow-hidden"
+                    >
+                      <div className="p-6 border-b border-slate-800 flex justify-between items-center">
+                        <h3 className="text-lg font-black text-white uppercase tracking-tighter">
+                          {editingGoalId ? "Refine Goal" : "Launch New Mission"}
+                        </h3>
+                        <button onClick={() => setShowGoalForm(false)} className="text-slate-500 hover:text-white">
+                          <X size={20} />
+                        </button>
+                      </div>
+                      <div className="p-6 space-y-4">
+                        <div className="space-y-1.5">
+                          <label className="text-[9px] font-black text-slate-500 uppercase tracking-widest ml-1">Goal Description</label>
+                          <input 
+                            type="text"
+                            placeholder="e.g. Dream Car, Euro Trip"
+                            value={goalFormData.name}
+                            onChange={e => setGoalFormData({...goalFormData, name: e.target.value})}
+                            className="w-full bg-slate-950 border border-slate-800 rounded-2xl px-4 py-3 text-sm font-black text-white outline-none focus:border-emerald-500/50"
+                          />
+                        </div>
+                        <div className="grid grid-cols-2 gap-3">
+                          <div className="space-y-1.5">
+                            <label className="text-[9px] font-black text-slate-500 uppercase tracking-widest ml-1">Target Amount (₹)</label>
+                            <input 
+                              type="number"
+                              placeholder="0"
+                              value={goalFormData.target}
+                              onChange={e => setGoalFormData({...goalFormData, target: e.target.value})}
+                              className="w-full bg-slate-950 border border-slate-800 rounded-2xl px-4 py-3 text-sm font-black text-white outline-none focus:border-emerald-500/50"
+                            />
+                          </div>
+                          <div className="space-y-1.5">
+                            <label className="text-[9px] font-black text-slate-500 uppercase tracking-widest ml-1">Target Date (Optional)</label>
+                            <input 
+                              type="date"
+                              value={goalFormData.targetDate}
+                              onChange={e => setGoalFormData({...goalFormData, targetDate: e.target.value})}
+                              className="w-full bg-slate-950 border border-slate-800 rounded-2xl px-4 py-3 text-xs font-black text-white outline-none focus:border-emerald-500/50"
+                            />
+                          </div>
+                        </div>
+                        <div className="space-y-3 pt-2">
+                           <div className="flex justify-between items-end">
+                             <label className="text-[9px] font-black text-emerald-400 uppercase tracking-widest ml-1">Savings Allocation</label>
+                             <span className="text-[10px] font-black text-white uppercase">{goalFormData.allocatedPercentage}% of monthly net</span>
+                           </div>
+                           <input 
+                             type="range"
+                             min="1"
+                             max="100"
+                             value={goalFormData.allocatedPercentage}
+                             onChange={e => setGoalFormData({...goalFormData, allocatedPercentage: parseInt(e.target.value)})}
+                             className="w-full h-1.5 bg-slate-800 rounded-lg appearance-none cursor-pointer accent-emerald-500"
+                           />
+                           <p className="text-[8px] text-slate-500 font-bold uppercase leading-relaxed italic">
+                             This % of your (Monthly Income - Expenses) will be credited to this goal automatically.
+                           </p>
+                        </div>
+                        <button 
+                          onClick={async () => {
+                             if (!goalFormData.name || !goalFormData.target) return showToast("Name and Target are required", "error");
+                             let updatedGoals;
+                             const timestamp = new Date().toISOString();
+                             
+                             if (editingGoalId) {
+                               updatedGoals = goals.map(g => g.id === editingGoalId ? {
+                                 ...g,
+                                 name: goalFormData.name || "Untitled Goal",
+                                 target: parseFloat(goalFormData.target) || 0,
+                                 targetDate: goalFormData.targetDate || "",
+                                 allocatedPercentage: goalFormData.allocatedPercentage ?? 20,
+                                 updatedAt: timestamp
+                               } : g);
+                             } else {
+                               const newGoal: Goal = {
+                                 id: Date.now().toString(),
+                                 name: goalFormData.name || "Untitled Goal",
+                                 target: parseFloat(goalFormData.target) || 0,
+                                 current: 0,
+                                 allocatedPercentage: goalFormData.allocatedPercentage ?? 20,
+                                 targetDate: goalFormData.targetDate || "",
+                                 createdAt: timestamp,
+                                 updatedAt: timestamp
+                               };
+                               updatedGoals = [...goals, newGoal];
+                             }
+                             
+                             setGoals(updatedGoals as Goal[]);
+                             if (user) await setDoc(doc(db, "users", user.uid, "config", "main"), { goals: updatedGoals }, { merge: true });
+                             setShowGoalForm(false);
+                             showToast(editingGoalId ? "Goal re-calibrated!" : "Goal forge initiated!");
+                          }}
+                          className="w-full bg-emerald-500 hover:bg-emerald-400 text-slate-900 py-4 rounded-2xl font-black uppercase text-xs tracking-widest transition-all mt-4"
+                        >
+                          {editingGoalId ? "Save Changes" : "Forge Goal"}
+                        </button>
+                      </div>
+                    </motion.div>
+                  </motion.div>
+                )}
+              </AnimatePresence>
+
+              {/* Goals Summary Card */}
+              {goals.length > 0 && (
+                <div className="bg-gradient-to-br from-slate-900 to-emerald-950/20 border border-slate-800 p-5 rounded-3xl relative overflow-hidden">
+                  <div className="relative z-10">
+                    <p className="text-[9px] font-black uppercase tracking-widest text-slate-500 mb-1">Vault Portfolio status</p>
+                    <div className="flex items-baseline gap-2">
+                       <p className="text-3xl font-black text-white">
+                         {formatINR(goals.reduce((acc, g) => acc + (g.current || 0), 0) + emergencyFund)}
+                       </p>
+                       <p className="text-[10px] font-bold text-emerald-400/60 uppercase">
+                         Cumulative Stash
+                       </p>
+                    </div>
+                  </div>
+                  <div className="absolute -right-4 -bottom-4 opacity-5 rotate-12">
+                    <Target size={120} />
+                  </div>
+                </div>
+              )}
+
+              <div className="space-y-4">
+                {emergencyFundTarget <= 0 ? (
+                  <div className="bg-slate-900 border-2 border-dashed border-blue-500/20 rounded-3xl p-8 flex flex-col items-center justify-center gap-6 group hover:border-blue-500/40 transition-all shadow-xl shadow-blue-500/5">
+                    <div className="w-16 h-16 rounded-full bg-blue-500/10 flex items-center justify-center text-blue-400 group-hover:bg-blue-500/20 group-hover:scale-110 transition-all">
+                      <Shield size={32} />
+                    </div>
+                    <div className="text-center space-y-2">
+                      <p className="text-sm font-black text-white uppercase tracking-widest italic">Establish Emergency Shield</p>
+                      <p className="text-[10px] text-slate-500 font-bold uppercase max-w-[200px] mx-auto leading-relaxed">Activate your defensive financial barrier to survive unforeseen fiscal storms</p>
+                    </div>
+                    
+                    <div className="w-full space-y-3">
+                      <div className="relative">
+                        <span className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-500 font-black italic text-xs">Target</span>
+                        <input 
+                          type="number"
+                          placeholder="e.g. 150,000"
+                          id="emergency_target_input"
+                          className="w-full bg-slate-950 border border-slate-800 rounded-2xl py-4 pl-20 pr-4 text-white font-black italic text-sm focus:border-blue-500/50 transition-all outline-none"
+                        />
+                      </div>
+                      <button 
+                        onClick={async () => {
+                          const input = document.getElementById('emergency_target_input') as HTMLInputElement;
+                          const target = parseFloat(input?.value || "0");
+                          if (target <= 0) return showToast("Set a valid target integrity", "error");
+                          
+                          setEmergencyFundTarget(target);
+                          if (user) await setDoc(doc(db, "users", user.uid, "config", "main"), { emergencyFundTarget: target }, { merge: true });
+                          showToast("Shield Protocol Initiated", "success");
+                        }}
+                        className="w-full py-4 bg-blue-500 hover:bg-blue-400 text-slate-950 rounded-2xl font-black uppercase text-xs tracking-widest transition-all shadow-lg shadow-blue-500/20 active:scale-95"
+                      >
+                        Forge Shield
+                      </button>
+                    </div>
+                  </div>
+                ) : (() => {
+                    const goal = { id: 'emergency_fund', name: 'Emergency Fund', current: emergencyFund, target: emergencyFundTarget };
+                    const progress = Math.min(100, (goal.current / (goal.target || 1)) * 100);
+                    const remaining = goal.target - goal.current;
+                    
+                    return (
+                      <motion.div 
+                        layout
+                        key={goal.id} 
+                        className="bg-slate-900 border-2 border-blue-500/20 rounded-3xl p-5 shadow-xl relative overflow-hidden group hover:border-blue-500/40 transition-all shadow-blue-500/5"
+                      >
+                        <div className="absolute top-0 right-0 p-4 opacity-5 group-hover:opacity-10 transition-opacity">
+                          <Shield size={60} className="text-blue-400" />
+                        </div>
+
+                        <div className="flex justify-between items-start mb-6 relative z-10">
+                          <div>
+                            <div className="flex items-center gap-2">
+                               <Shield size={14} className="text-blue-400" />
+                               <h3 className="text-base font-black text-white italic group-hover:text-blue-400 transition-colors uppercase tracking-tight">{goal.name}</h3>
+                            </div>
+                            <div className="flex items-center gap-2 mt-1">
+                               <div className={`w-1.5 h-1.5 rounded-full ${progress >= 100 ? 'bg-emerald-400' : 'bg-blue-400 animate-pulse'}`} />
+                               <p className="text-[10px] text-slate-500 font-black uppercase tracking-widest">
+                                 {progress >= 100 ? 'Fully Shielded' : `${formatINR(remaining)} to Secure`}
+                               </p>
+                            </div>
+                          </div>
+                          <div className="flex gap-2">
+                             <button 
+                               onClick={async () => {
+                                 if (deleteConfirmGoalId === 'emergency_fund') {
+                                   // Optimistic UI update
+                                   setEmergencyFund(0);
+                                   setEmergencyFundTarget(0);
+                                   setTransactions(prev => prev.filter(t => t.goalId !== 'emergency_fund'));
+                                   setDeleteConfirmGoalId(null);
+                                   
+                                   if (user) {
+                                     try {
+                                       await setDoc(doc(db, "users", user.uid, "config", "main"), { 
+                                         emergencyFund: 0, 
+                                         emergencyFundTarget: 0 
+                                       }, { merge: true });
+                                       
+                                       const txQuery = query(
+                                         collection(db, "users", user.uid, "transactions"),
+                                         where("goalId", "==", "emergency_fund")
+                                       );
+                                       const snapshot = await getDocs(txQuery);
+                                       const deletePromises = snapshot.docs.map(d => deleteDoc(doc(db, "users", user.uid, "transactions", d.id)));
+                                       await Promise.all(deletePromises);
+                                     } catch (error) {
+                                       handleFirestoreError(error, OperationType.DELETE, `users/${user.uid}/emergency_fund`);
+                                     }
+                                   }
+                                   showToast("Shield Deactivated", "warn");
+                                 } else {
+                                   setDeleteConfirmGoalId('emergency_fund');
+                                   showToast("Click again to confirm purge", "warn");
+                                 }
+                               }}
+                               className={`p-2.5 rounded-xl transition-all border ${deleteConfirmGoalId === 'emergency_fund' ? 'bg-rose-500 text-white border-rose-600 animate-pulse' : 'bg-rose-500/10 text-rose-500 border-rose-500/20 hover:bg-rose-500 hover:text-white'}`}
+                               title="Reset Shield"
+                             >
+                               <Trash2 size={16} />
+                             </button>
+                          </div>
+                        </div>
+
+                        {/* Progress Engine */}
+                        <div className="space-y-3 mb-6 relative z-10">
+                           <div className="flex justify-between items-end">
+                              <div className="flex flex-col">
+                                 <p className="text-[10px] font-black text-slate-500 uppercase tracking-widest">Current Defense</p>
+                                 <p className="text-lg font-black text-white italic">{formatINR(goal.current)}</p>
+                              </div>
+                              <div className="text-right">
+                                 <div className="flex items-center justify-end gap-1.5 mb-1 group/target">
+                                    <p className="text-[10px] font-black text-slate-500 uppercase tracking-widest">Target Integrity</p>
+                                    {!isEditingEmergencyTarget && (
+                                      <button 
+                                        onClick={() => {
+                                          setTempEmergencyTarget(goal.target.toString());
+                                          setIsEditingEmergencyTarget(true);
+                                        }}
+                                        className="text-slate-600 hover:text-blue-400 transition-all font-black"
+                                        title="Edit Target"
+                                      >
+                                        <Edit2 size={10} />
+                                      </button>
+                                    )}
+                                 </div>
+                                 {isEditingEmergencyTarget ? (
+                                   <div className="flex items-center gap-1 justify-end animate-in fade-in slide-in-from-right-1 duration-200">
+                                      <input 
+                                        type="number"
+                                        autoFocus
+                                        value={tempEmergencyTarget}
+                                        onChange={e => setTempEmergencyTarget(e.target.value)}
+                                        onKeyDown={async (e) => {
+                                          if (e.key === 'Enter') {
+                                            const val = parseInt(tempEmergencyTarget);
+                                            if (!isNaN(val) && val >= 0) {
+                                              setEmergencyFundTarget(val);
+                                              if (user) await setDoc(doc(db, "users", user.uid, "config", "main"), { emergencyFundTarget: val }, { merge: true });
+                                              setIsEditingEmergencyTarget(false);
+                                              showToast("Shield Recalibrated", "success");
+                                            }
+                                          } else if (e.key === 'Escape') {
+                                            setIsEditingEmergencyTarget(false);
+                                          }
+                                        }}
+                                        className="w-24 bg-slate-950 border border-blue-500/50 rounded-lg px-2 py-1 text-xs font-black text-white text-right outline-none ring-2 ring-blue-500/10"
+                                      />
+                                      <div className="flex gap-0.5">
+                                        <button 
+                                          onClick={async () => {
+                                            const val = parseInt(tempEmergencyTarget);
+                                            if (!isNaN(val) && val >= 0) {
+                                              setEmergencyFundTarget(val);
+                                              if (user) await setDoc(doc(db, "users", user.uid, "config", "main"), { emergencyFundTarget: val }, { merge: true });
+                                              setIsEditingEmergencyTarget(false);
+                                              showToast("Shield Recalibrated", "success");
+                                            }
+                                          }}
+                                          className="p-1 text-emerald-500 hover:bg-emerald-500/10 rounded-md"
+                                        >
+                                          <Check size={12}/>
+                                        </button>
+                                        <button onClick={() => setIsEditingEmergencyTarget(false)} className="p-1 text-rose-500 hover:bg-rose-500/10 rounded-md transition-colors">
+                                          <X size={12}/>
+                                        </button>
+                                      </div>
+                                   </div>
+                                 ) : (
+                                   <p 
+                                     onClick={() => {
+                                       setTempEmergencyTarget(goal.target.toString());
+                                       setIsEditingEmergencyTarget(true);
+                                     }}
+                                     className="text-sm font-black text-white italic tracking-tighter cursor-pointer hover:text-blue-400 transition-colors"
+                                   >
+                                     {formatINR(goal.target)}
+                                   </p>
+                                 )}
+                              </div>
+                           </div>
+                           <div className="h-3 w-full bg-slate-950 rounded-full overflow-hidden p-0.5 border border-slate-800">
+                             <motion.div 
+                               initial={{ width: 0 }}
+                               animate={{ width: `${progress}%` }}
+                               transition={{ duration: 1.5, ease: "easeOut" }}
+                               className={`h-full rounded-full relative ${progress >= 100 ? 'bg-emerald-500' : 'bg-gradient-to-r from-blue-600 to-blue-400'}`}
+                             >
+                               {progress > 10 && (
+                                 <div className="absolute inset-0 bg-[linear-gradient(45deg,rgba(255,255,255,0.1)_25%,transparent_25%,transparent_50%,rgba(255,255,255,0.1)_50%,rgba(255,255,255,0.1)_75%,transparent_75%,transparent)] bg-[length:20px_20px] animate-[slide_1s_linear_infinite]" />
+                               )}
+                             </motion.div>
+                           </div>
+                           <p className="text-[9px] font-bold text-slate-600 uppercase tracking-widest text-center">{progress.toFixed(1)}% Mission Completion</p>
+                        </div>
+
+                        <div className="pt-2 relative z-10">
+                          <AnimatePresence mode="wait">
+                            {infuseGoalId === goal.id ? (
+                              <motion.div 
+                                initial={{ height: 0, opacity: 0 }}
+                                animate={{ height: 'auto', opacity: 1 }}
+                                exit={{ height: 0, opacity: 0 }}
+                                className="overflow-hidden"
+                              >
+                                <div className="p-4 bg-slate-950/80 border-2 border-blue-500/30 rounded-2xl space-y-4 shadow-[0_0_30px_rgba(59,130,246,0.1)] mb-4">
+                                   <div className="flex justify-between items-center">
+                                      <div className="flex gap-2 p-1 bg-slate-900 rounded-lg">
+                                         <button 
+                                           onClick={() => setInfuseMode('add')}
+                                           className={`px-3 py-1.5 rounded-md text-[8px] font-black uppercase tracking-widest transition-all ${infuseMode === 'add' ? 'bg-blue-500 text-slate-900' : 'text-slate-500 hover:text-white'}`}
+                                         >
+                                           Reinforce
+                                         </button>
+                                         <button 
+                                           onClick={() => setInfuseMode('subtract')}
+                                           className={`px-3 py-1.5 rounded-md text-[8px] font-black uppercase tracking-widest transition-all ${infuseMode === 'subtract' ? 'bg-rose-500 text-white' : 'text-slate-500 hover:text-white'}`}
+                                         >
+                                           Withdraw
+                                         </button>
+                                      </div>
+                                      <button onClick={() => setInfuseGoalId(null)} className="p-1 rounded-full hover:bg-slate-800 text-slate-500 hover:text-white transition-colors">
+                                        <X size={14} />
+                                      </button>
+                                   </div>
+                                   <div className="relative">
+                                      <span className={`absolute left-4 top-1/2 -translate-y-1/2 text-sm font-black transition-colors ${infuseMode === 'add' ? 'text-blue-500' : 'text-rose-500'}`}>₹</span>
+                                      <input 
+                                        type="number"
+                                        autoFocus
+                                        value={infuseAmount}
+                                        onChange={e => setInfuseAmount(e.target.value)}
+                                        placeholder="0"
+                                        onKeyDown={async (e) => {
+                                          if (e.key === 'Enter') {
+                                            const amount = parseFloat(infuseAmount);
+                                            if (isNaN(amount) || amount <= 0) return showToast("Enter a valid amount", "error");
+                                            
+                                            const newTx: Transaction = {
+                                              id: generateId("tx"),
+                                              amount: amount,
+                                              description: infuseMode === 'add' ? `Shield Reinforcement: Emergency Fund` : `Fund Utilization: Emergency Fund`,
+                                              category: "Savings",
+                                              type: infuseMode === 'add' ? "expense" : "income",
+                                              date: getLocalDateString(new Date()),
+                                              goalId: "emergency_fund"
+                                            };
+
+                                            const newVal = infuseMode === 'add' ? emergencyFund + amount : Math.max(0, emergencyFund - amount);
+                                            setEmergencyFund(newVal);
+                                            setTransactions(prev => [newTx, ...prev]);
+
+                                            if (user) {
+                                              setDoc(doc(db, "users", user.uid, "config", "main"), { emergencyFund: newVal }, { merge: true });
+                                              addDoc(collection(db, "users", user.uid, "transactions"), newTx);
+                                            }
+                                            setInfuseGoalId(null);
+                                            setInfuseAmount("");
+                                            showToast(infuseMode === 'add' ? `₹${amount} Added to Defense!` : `₹${amount} Withdrawn from Defense`, infuseMode === 'add' ? "success" : "warn");
+                                          }
+                                        }}
+                                        className={`w-full bg-slate-950 border rounded-xl pl-8 pr-4 py-4 text-base font-black text-white outline-none transition-all placeholder:text-slate-700 ${infuseMode === 'add' ? 'border-blue-500/30 focus:border-blue-500/50' : 'border-rose-500/30 focus:border-rose-500/50'}`}
+                                      />
+                                   </div>
+                                   <button 
+                                     onClick={async () => {
+                                       const amount = parseFloat(infuseAmount);
+                                       if (isNaN(amount) || amount <= 0) return showToast("Enter a valid amount", "error");
+                                       
+                                       const newTx: Transaction = {
+                                         id: generateId("tx"),
+                                         amount: amount,
+                                         description: infuseMode === 'add' ? `Shield Reinforcement: Emergency Fund` : `Fund Utilization: Emergency Fund`,
+                                         category: "Savings",
+                                         type: infuseMode === 'add' ? "expense" : "income",
+                                         date: getLocalDateString(new Date()),
+                                         goalId: "emergency_fund"
+                                       };
+
+                                       const newVal = infuseMode === 'add' ? emergencyFund + amount : Math.max(0, emergencyFund - amount);
+                                       setEmergencyFund(newVal);
+                                       setTransactions(prev => [newTx, ...prev]);
+
+                                       if (user) {
+                                         setDoc(doc(db, "users", user.uid, "config", "main"), { emergencyFund: newVal }, { merge: true });
+                                         addDoc(collection(db, "users", user.uid, "transactions"), newTx);
+                                       }
+                                       setInfuseGoalId(null);
+                                       setInfuseAmount("");
+                                       showToast(infuseMode === 'add' ? `₹${amount} Added to Defense!` : `₹${amount} Withdrawn from Defense`, infuseMode === 'add' ? "success" : "warn");
+                                     }}
+                                     className={`w-full py-3.5 rounded-xl text-[10px] font-black uppercase tracking-widest transition-all shadow-lg active:scale-95 ${infuseMode === 'add' ? 'bg-blue-500 hover:bg-blue-400 text-slate-900 shadow-blue-500/20' : 'bg-rose-500 hover:bg-rose-400 text-white shadow-rose-500/20'}`}
+                                   >
+                                     {infuseMode === 'add' ? 'Seal Reinforcement' : 'Confirm Withdrawal'}
+                                   </button>
+                                </div>
+                              </motion.div>
+                            ) : (
+                              <button 
+                                onClick={() => {
+                                  setInfuseGoalId(goal.id);
+                                  setInfuseAmount("");
+                                }}
+                                className="w-full bg-slate-950 hover:bg-slate-800 border border-slate-800 hover:border-blue-500/30 py-4 rounded-2xl flex items-center justify-center gap-3 transition-all active:scale-98 group"
+                              >
+                                <div className="w-8 h-8 rounded-full bg-blue-500/10 flex items-center justify-center text-blue-400 group-hover:bg-blue-500 group-hover:text-slate-900 transition-all">
+                                  <Shield size={18} className="group-hover:scale-110 transition-transform" />
+                                </div>
+                                <div className="text-left">
+                                  <p className="text-[10px] font-black text-white uppercase tracking-widest">Reinforce Shield</p>
+                                  <p className="text-[8px] text-slate-500 font-bold uppercase">Emergency Prep</p>
+                                </div>
+                                <div className="ml-auto mr-2">
+                                   <Plus size={14} className="text-slate-700 group-hover:text-blue-500 transition-colors" />
+                                </div>
+                              </button>
+                            )}
+                          </AnimatePresence>
+                        </div>
+
+                        {/* Goal Specific Transaction History */}
+                        {transactions.some(t => t.goalId === goal.id) && (
+                          <div className="mt-8 pt-6 border-t border-slate-800/50">
+                             <div className="flex items-center justify-between mb-4">
+                               <p className="text-[9px] font-black text-slate-500 uppercase tracking-[0.2em] flex items-center gap-2">
+                                 <History size={12} className="text-blue-500" /> Defensive Logs
+                               </p>
+                               <button 
+                                 onClick={() => exportSavingsPDF('emergency')}
+                                 className="flex items-center gap-1.5 px-2 py-1 bg-blue-500/10 hover:bg-blue-500/20 text-blue-400 rounded-lg text-[8px] font-black uppercase tracking-widest transition-all"
+                               >
+                                 <Download size={10} /> PDF Export
+                               </button>
+                             </div>
+                             <div className="space-y-2.5 max-h-[160px] overflow-y-auto pr-2 no-scrollbar">
+                               {transactions
+                                 .filter(t => t.goalId === goal.id)
+                                 .sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime())
+                                 .map((t, idx) => (
+                                   <div key={idx} className="flex items-center justify-between p-3 rounded-2xl bg-slate-950/40 border border-slate-800/30 group/tx">
+                                      <div className="flex items-center gap-3">
+                                         <div className="w-7 h-7 rounded-lg bg-blue-500/5 flex items-center justify-center text-blue-400 border border-blue-500/10">
+                                            <Shield size={12} />
+                                         </div>
+                                         <div className="min-w-0">
+                                            <p className="text-[10px] font-black text-slate-300 uppercase tracking-tighter italic truncate">{t.description.replace(`: Emergency Fund`, '')}</p>
+                                            <p className="text-[8px] font-bold text-slate-600 uppercase tracking-widest">{formatDate(t.date)}</p>
+                                         </div>
+                                      </div>
+                                <div className="text-right flex flex-col items-end">
+                                         <p className={`text-[11px] font-black ${t.type === 'expense' ? 'text-blue-400' : 'text-rose-400'}`}>
+                                            {t.type === 'expense' ? '+' : '-'} {formatINR(t.amount)}
+                                         </p>
+                                         <button 
+                                           onClick={(e) => {
+                                             e.stopPropagation();
+                                             deleteTransaction(t.id);
+                                           }}
+                                           className="opacity-40 group-hover/tx:opacity-100 transition-opacity text-slate-700 hover:text-rose-500"
+                                         >
+                                           <Trash2 size={10} />
+                                         </button>
+                                      </div>
+                                   </div>
+                                 ))}
+                             </div>
+                          </div>
+                        )}
+                      </motion.div>
+                    );
+                })()}
+
+                {goals.length === 0 ? (
+                  <div className="py-20 text-center space-y-4">
+                    <div className="w-16 h-16 bg-slate-900 rounded-3xl flex items-center justify-center text-slate-700 mx-auto border-2 border-dashed border-slate-800">
+                      <Zap size={32} />
+                    </div>
+                    <div>
+                      <p className="text-xs font-black text-white uppercase tracking-widest italic">Mission Queue Empty</p>
+                      <p className="text-[9px] font-bold text-slate-500 mt-1 uppercase tracking-widest">Ignite further financial operations</p>
+                    </div>
+                  </div>
+                ) : (
+                  goals.map((goal) => {
+                    const progress = Math.min(100, (goal.current / (goal.target || 1)) * 100);
+                    const remaining = goal.target - goal.current;
+                    const netSavings = Math.max(0, monthInc - monthExp);
+                    const monthlyAlloc = (netSavings * goal.allocatedPercentage) / 100;
+                    const estMonths = monthlyAlloc > 0 ? Math.ceil(remaining / monthlyAlloc) : Infinity;
+                    
+                    return (
+                      <motion.div 
+                        layout
+                        key={goal.id} 
+                        className="bg-slate-900/50 border border-slate-800 rounded-3xl p-5 shadow-xl relative overflow-hidden group hover:border-emerald-500/20 transition-all"
+                      >
+                        <div className="flex justify-between items-start mb-6">
+                          <div>
+                            <h3 className="text-base font-black text-white italic group-hover:text-emerald-400 transition-colors uppercase tracking-tight">{goal.name}</h3>
+                            <div className="flex items-center gap-2 mt-1">
+                               <div className={`w-1.5 h-1.5 rounded-full ${progress >= 100 ? 'bg-emerald-400' : 'bg-amber-400 animate-pulse'}`} />
+                               <p className="text-[10px] text-slate-500 font-black uppercase tracking-widest">
+                                 {progress >= 100 ? 'Target Reached' : `₹${formatINR(remaining)} Remaining`}
+                               </p>
+                            </div>
+                          </div>
+                          <div className="flex gap-2">
+                             <button 
+                               onClick={() => {
+                                 setEditingGoalId(goal.id);
+                                 setGoalFormData({
+                                   name: goal.name,
+                                   target: goal.target.toString(),
+                                   targetDate: goal.targetDate || "",
+                                   allocatedPercentage: goal.allocatedPercentage
+                                 });
+                                 setShowGoalForm(true);
+                               }}
+                               className="p-2 bg-slate-950 text-slate-600 hover:text-emerald-400 rounded-xl transition-all"
+                             >
+                               <Edit2 size={12} />
+                             </button>
+                             <div className="relative">
+                               <button 
+                                 onClick={() => setDeleteConfirmGoalId(goal.id === deleteConfirmGoalId ? null : goal.id)}
+                                 className={`p-2 bg-slate-950 rounded-xl transition-all ${goal.id === deleteConfirmGoalId ? 'text-rose-500 bg-rose-500/10' : 'text-slate-600 hover:text-rose-500'}`}
+                               >
+                                 <Trash2 size={12} />
+                               </button>
+                               <AnimatePresence>
+                                 {deleteConfirmGoalId === goal.id && (
+                                   <motion.div 
+                                     initial={{ opacity: 0, scale: 0.9, y: 10 }}
+                                     animate={{ opacity: 1, scale: 1, y: 0 }}
+                                     exit={{ opacity: 0, scale: 0.9, y: 10 }}
+                                     className="absolute right-0 top-full mt-2 z-50 bg-slate-950 border border-slate-800 p-3 rounded-2xl shadow-2xl w-48 text-center"
+                                   >
+                                     <p className="text-[10px] font-black text-rose-400 uppercase tracking-widest mb-3">Destroy Mission?</p>
+                                     <div className="flex gap-2">
+                                       <button 
+                                         onClick={async () => {
+                                           // 1. Delete associated transactions locally
+                                           setTransactions(prev => prev.filter(t => t.goalId !== goal.id));
+                                           
+                                           if (user) {
+                                             const txQuery = query(
+                                               collection(db, "users", user.uid, "transactions"),
+                                               where("goalId", "==", goal.id)
+                                             );
+                                             const txSnapshot = await getDocs(txQuery);
+                                             for (const txDoc of txSnapshot.docs) {
+                                               await deleteDoc(doc(db, "users", user.uid, "transactions", txDoc.id));
+                                             }
+                                           }
+
+                                           // 2. Delete goal
+                                           const updated = goals.filter(g => g.id !== goal.id);
+                                           setGoals(updated);
+                                           if (user) await setDoc(doc(db, "users", user.uid, "config", "main"), { goals: updated }, { merge: true });
+                                           setDeleteConfirmGoalId(null);
+                                           showToast("Goal & linked logs purged", "warn");
+                                         }}
+                                         className="flex-1 bg-rose-500 text-white py-2 rounded-xl text-[9px] font-black uppercase"
+                                       >
+                                         Yes
+                                       </button>
+                                       <button 
+                                         onClick={() => setDeleteConfirmGoalId(null)}
+                                         className="flex-1 bg-slate-800 text-slate-400 py-2 rounded-xl text-[9px] font-black uppercase"
+                                       >
+                                         No
+                                       </button>
+                                     </div>
+                                   </motion.div>
+                                 )}
+                               </AnimatePresence>
+                             </div>
+                          </div>
+                        </div>
+
+                        {/* Progress Engine */}
+                        <div className="space-y-3 mb-6">
+                           <div className="flex justify-between items-end">
+                              <p className="text-[20px] font-black text-white">
+                                {formatINR(goal.current)} <span className="text-[10px] text-slate-600 italic uppercase">/ {formatINR(goal.target)}</span>
+                              </p>
+                              <span className="text-xl font-black text-emerald-400 italic">{progress.toFixed(0)}%</span>
+                           </div>
+                           <div className="h-2 w-full bg-slate-950 rounded-full overflow-hidden border border-slate-800">
+                             <motion.div 
+                               initial={{ width: 0 }}
+                               animate={{ width: `${progress}%` }}
+                               className={`h-full transition-all ${progress >= 100 ? 'bg-emerald-400 shadow-[0_0_15px_rgba(52,211,153,0.4)]' : 'bg-gradient-to-r from-emerald-600 to-emerald-400'}`}
+                             />
+                           </div>
+                        </div>
+
+                        {/* Intelligence Grid */}
+                        <div className="grid grid-cols-2 gap-3 mb-6">
+                           <div className="bg-slate-950/50 p-4 rounded-2xl border border-slate-800/50 flex flex-col justify-between group/slice">
+                              <div>
+                                <p className="text-[9px] font-black text-slate-600 uppercase tracking-widest mb-1 items-center flex gap-1"><ArrowUpCircle size={10} className="text-emerald-400" /> Monthly Slice</p>
+                                <p className="text-sm font-black text-white">{formatINR(monthlyAlloc)}</p>
+                                <p className="text-[8px] font-bold text-slate-500 mt-0.5">{goal.allocatedPercentage}% of Monthly Net</p>
+                              </div>
+                              {monthlyAlloc > 0 && (
+                                <button 
+                                  onClick={async () => {
+                                    const updatedGoals = goals.map(g => g.id === goal.id ? { 
+                                      ...g, 
+                                      current: (g.current || 0) + monthlyAlloc, 
+                                      updatedAt: new Date().toISOString() 
+                                    } : g);
+                                    setGoals(updatedGoals);
+                                    if (user) {
+                                      await setDoc(doc(db, "users", user.uid, "config", "main"), { goals: updatedGoals }, { merge: true });
+                                      await addDoc(collection(db, "users", user.uid, "transactions"), {
+                                        amount: monthlyAlloc,
+                                        description: `Monthly Cut: ${goal.name}`,
+                                        category: "Savings",
+                                        type: "expense",
+                                        date: getLocalDateString(new Date()),
+                                        goalId: goal.id
+                                      });
+                                    }
+                                    showToast("Monthly cut committed!", "success");
+                                  }}
+                                  className="mt-3 w-full bg-emerald-500/10 hover:bg-emerald-500 text-emerald-400 hover:text-slate-900 py-1.5 rounded-lg text-[8px] font-black uppercase tracking-widest transition-all opacity-0 group-hover/slice:opacity-100"
+                                >
+                                  Commit Slice
+                                </button>
+                              )}
+                           </div>
+                           <div className="bg-slate-950/50 p-4 rounded-2xl border border-slate-800/50">
+                              <p className="text-[9px] font-black text-slate-600 uppercase tracking-widest mb-1 items-center flex gap-1"><Calendar size={10} className="text-amber-400" /> ETD</p>
+                              <p className="text-sm font-black text-white">
+                                {estMonths === Infinity ? 'N/A' : progress >= 100 ? 'DONE' : `${estMonths} Months`}
+                              </p>
+                              <p className="text-[8px] font-bold text-slate-500 mt-0.5">{progress >= 100 ? 'Goal Completed' : 'Est. Completion'}</p>
+                           </div>
+                        </div>
+
+                        {/* AI Insight Overlay */}
+                        {monthlyAlloc > 0 && estMonths !== Infinity && (
+                          <div className="mb-6 px-1">
+                             <div className="flex items-start gap-3 p-3 bg-emerald-500/5 rounded-2xl border border-emerald-500/10">
+                                <Sparkles size={14} className="text-emerald-400 mt-1 shrink-0" />
+                                <p className="text-[9px] font-bold text-emerald-400/80 leading-relaxed italic">
+                                  {netSavings > 20000 
+                                    ? "High savings rate detected! You'll smash this goal faster than projected if spending stays low."
+                                    : "Keep it up! Your monthly allocation is locked in. Complete your mission with consistency."}
+                                </p>
+                             </div>
+                          </div>
+                        )}
+
+                        <div className="pt-2">
+                          <AnimatePresence mode="wait">
+                            {infuseGoalId === goal.id ? (
+                              <motion.div 
+                                initial={{ height: 0, opacity: 0 }}
+                                animate={{ height: 'auto', opacity: 1 }}
+                                exit={{ height: 0, opacity: 0 }}
+                                className="overflow-hidden"
+                              >
+                                <div className="p-4 bg-slate-950/80 border-2 border-emerald-500/30 rounded-2xl space-y-4 shadow-[0_0_30px_rgba(16,185,129,0.1)] mb-4">
+                                   <div className="flex justify-between items-center">
+                                      <div>
+                                         <p className="text-[9px] font-black text-emerald-400 uppercase tracking-widest">Savings Infusion</p>
+                                         <p className="text-[8px] text-slate-500 font-bold uppercase">Target: {formatINR(goal.target)}</p>
+                                      </div>
+                                      <button onClick={() => setInfuseGoalId(null)} className="p-1 rounded-full hover:bg-slate-800 text-slate-500 hover:text-white transition-colors">
+                                        <X size={14} />
+                                      </button>
+                                   </div>
+                                   <div className="relative">
+                                      <span className="absolute left-4 top-1/2 -translate-y-1/2 text-sm font-black text-emerald-500/50">₹</span>
+                                      <input 
+                                        type="number"
+                                        autoFocus
+                                        value={infuseAmount}
+                                        onChange={e => setInfuseAmount(e.target.value)}
+                                        placeholder="0"
+                                        onKeyDown={async (e) => {
+                                          if (e.key === 'Enter') {
+                                            const amount = parseFloat(infuseAmount);
+                                            if (isNaN(amount) || amount <= 0) return showToast("Enter a valid amount", "error");
+                                            
+                                            const updatedGoals = goals.map(g => g.id === goal.id ? { 
+                                              ...g, 
+                                              current: (g.current || 0) + amount, 
+                                              updatedAt: new Date().toISOString() 
+                                            } : g);
+                                            setGoals(updatedGoals);
+                                            if (user) {
+                                              await setDoc(doc(db, "users", user.uid, "config", "main"), { goals: updatedGoals }, { merge: true });
+                                              // Record Transaction
+                                              await addDoc(collection(db, "users", user.uid, "transactions"), {
+                                                amount: amount,
+                                                description: `Goal Infusion: ${goal.name}`,
+                                                category: "Savings",
+                                                type: "expense",
+                                                date: getLocalDateString(new Date()),
+                                                goalId: goal.id
+                                              });
+                                            }
+                                            setInfuseGoalId(null);
+                                            setInfuseAmount("");
+                                            showToast(`₹${amount} Infused!`, "success");
+                                          }
+                                        }}
+                                        className="w-full bg-slate-950 border border-slate-800 rounded-xl pl-8 pr-4 py-4 text-base font-black text-white outline-none focus:border-emerald-500/50 transition-all placeholder:text-slate-700"
+                                      />
+                                   </div>
+                                   <button 
+                                     onClick={async () => {
+                                       const amount = parseFloat(infuseAmount);
+                                       if (isNaN(amount) || amount <= 0) return showToast("Enter a valid amount", "error");
+                                       
+                                       const updatedGoals = goals.map(g => g.id === goal.id ? { 
+                                         ...g, 
+                                         current: (g.current || 0) + amount, 
+                                         updatedAt: new Date().toISOString() 
+                                       } : g);
+                                       setGoals(updatedGoals);
+
+                                       const newTx: Transaction = {
+                                         id: generateId("tx"),
+                                         amount: amount,
+                                         description: `Goal Infusion: ${goal.name}`,
+                                         category: "Savings",
+                                         type: "expense",
+                                         date: getLocalDateString(new Date()),
+                                         goalId: goal.id
+                                       };
+
+                                       if (user) {
+                                         await setDoc(doc(db, "users", user.uid, "config", "main"), { goals: updatedGoals }, { merge: true });
+                                         await addDoc(collection(db, "users", user.uid, "transactions"), {
+                                           amount: newTx.amount,
+                                           description: newTx.description,
+                                           category: newTx.category,
+                                           type: newTx.type,
+                                           date: newTx.date,
+                                           goalId: newTx.goalId
+                                         });
+                                       } else {
+                                         setTransactions(prev => [newTx, ...prev]);
+                                       }
+                                       setInfuseGoalId(null);
+                                       setInfuseAmount("");
+                                       showToast(`₹${amount} Infused!`, "success");
+                                     }}
+                                     className="w-full bg-emerald-500 hover:bg-emerald-400 text-slate-900 py-3.5 rounded-xl text-[10px] font-black uppercase tracking-widest transition-all shadow-lg shadow-emerald-500/20 active:scale-95"
+                                   >
+                                     Seal Infusion
+                                   </button>
+                                </div>
+                              </motion.div>
+                            ) : (
+                              <button 
+                                onClick={() => {
+                                  setInfuseGoalId(goal.id);
+                                  setInfuseAmount("");
+                                }}
+                                className="w-full bg-slate-950 hover:bg-slate-800 border border-slate-800 hover:border-emerald-500/30 py-4 rounded-2xl flex items-center justify-center gap-3 transition-all active:scale-98 group"
+                              >
+                                <div className="w-8 h-8 rounded-full bg-emerald-500/10 flex items-center justify-center text-emerald-400 group-hover:bg-emerald-500 group-hover:text-slate-900 transition-all">
+                                  <Plus size={18} className="group-hover:scale-110 transition-transform" />
+                                </div>
+                                <div className="text-left">
+                                  <p className="text-[10px] font-black text-white uppercase tracking-widest">Infuse Savings</p>
+                                  <p className="text-[8px] text-slate-500 font-bold uppercase">Manual Contribution</p>
+                                </div>
+                                <div className="ml-auto mr-2">
+                                   <ChevronRight size={14} className="text-slate-700 group-hover:text-emerald-500 transition-colors" />
+                                </div>
+                              </button>
+                            )}
+                          </AnimatePresence>
+                        </div>
+
+                        {/* Goal Specific Transaction History */}
+                        {transactions.some(t => t.goalId === goal.id) && (
+                          <div className="mt-8 pt-6 border-t border-slate-800/50">
+                             <div className="flex items-center justify-between mb-4">
+                               <p className="text-[9px] font-black text-slate-500 uppercase tracking-[0.2em] flex items-center gap-2">
+                                 <History size={12} className="text-emerald-500" /> Mission Logs
+                               </p>
+                               <button 
+                                 onClick={() => exportSavingsPDF('goal', goal.id, goal.name)}
+                                 className="flex items-center gap-1.5 px-2 py-1 bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-400 rounded-lg text-[8px] font-black uppercase tracking-widest transition-all"
+                               >
+                                 <Download size={10} /> PDF Export
+                               </button>
+                             </div>
+                             <div className="space-y-2.5 max-h-[160px] overflow-y-auto pr-2 no-scrollbar">
+                               {transactions
+                                 .filter(t => t.goalId === goal.id)
+                                 .sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime())
+                                 .map((t, idx) => (
+                                   <div key={idx} className="flex items-center justify-between p-3 rounded-2xl bg-slate-950/40 border border-slate-800/30 group/tx">
+                                      <div className="flex items-center gap-3">
+                                         <div className="w-7 h-7 rounded-lg bg-emerald-500/5 flex items-center justify-center text-emerald-400 border border-emerald-500/10">
+                                            <Target size={12} />
+                                         </div>
+                                         <div className="min-w-0">
+                                            <p className="text-[10px] font-black text-slate-300 uppercase tracking-tighter italic truncate">{t.description.replace(`: ${goal.name}`, '')}</p>
+                                            <p className="text-[8px] font-bold text-slate-600 uppercase tracking-widest">{formatDate(t.date)}</p>
+                                         </div>
+                                      </div>
+                                      <div className="text-right flex flex-col items-end">
+                                         <p className="text-[11px] font-black text-emerald-400">+ {formatINR(t.amount)}</p>
+                                         <button 
+                                           onClick={(e) => {
+                                             e.stopPropagation();
+                                             deleteTransaction(t.id);
+                                           }}
+                                           className="opacity-40 group-hover/tx:opacity-100 transition-opacity text-slate-700 hover:text-rose-500"
+                                         >
+                                           <Trash2 size={10} />
+                                         </button>
+                                      </div>
+                                   </div>
+                                 ))}
+                             </div>
+                          </div>
+                        )}
+                      </motion.div>
+                    );
+                  })
+                )}
+              </div>
+              <div className="pb-10">
+                {/* Global logs removed as per request to show only for specific goal */}
               </div>
             </motion.div>
           )}
@@ -1999,6 +3471,33 @@ export default function App() {
                   </div>
                 </motion.div>
               )}
+
+              <div className="flex justify-between items-center px-1">
+                <h2 className="text-xl font-black text-white">Settings</h2>
+                {user && (
+                    <button 
+                      onClick={async () => {
+                        try {
+                          await setDoc(doc(db, "users", user.uid, "config", "main"), {
+                            categoryBudgets,
+                            monthlyIncome,
+                            totalDebt,
+                            emergencyFund,
+                            emergencyFundTarget,
+                            goals
+                          }, { merge: true });
+                          showToast("Config synced to Cloud", "success");
+                        } catch (e) {
+                          showToast("Sync failed", "error");
+                        }
+                      }}
+                      className="flex items-center gap-2 px-3 py-1.5 rounded-full bg-emerald-500/10 border border-emerald-500/20 text-emerald-400 text-[9px] font-black uppercase tracking-widest hover:bg-emerald-500/20 transition-all shadow-lg shadow-emerald-500/5 group"
+                    >
+                      <CloudLightning size={10} className="group-hover:scale-125 transition-transform" />
+                      Force Cloud Sync
+                    </button>
+                )}
+              </div>
 
               <div className="bg-slate-900 border border-slate-800 rounded-3xl overflow-hidden">
                 <div className="px-5 py-4 border-b border-slate-800 flex justify-between items-center">
@@ -2030,41 +3529,181 @@ export default function App() {
               </div>
 
               <div className="space-y-3">
-                <h3 className="text-[10px] font-black uppercase tracking-widest text-slate-600 px-2">AI Configuration</h3>
-                <div className="bg-slate-900 border border-slate-800 rounded-3xl p-4 flex items-center justify-between">
-                  <div className="flex flex-col">
-                    <span className="text-sm font-bold text-slate-200">AI Personality</span>
-                    <span className="text-[10px] text-slate-500 font-medium">Choose between Gemini and ChatGPT flavor</span>
+                <h3 className="text-[10px] font-black uppercase tracking-widest text-slate-600 px-2">Financial Health Profile</h3>
+                <div className="bg-slate-900 border border-slate-800 rounded-3xl p-5 space-y-4">
+                  <div className="space-y-1">
+                    <label className="text-[10px] font-black text-slate-500 uppercase tracking-widest">Monthly Net Income</label>
+                    <div className="relative">
+                      <span className="absolute left-3 top-1/2 -translate-y-1/2 text-emerald-500 text-sm font-bold">₹</span>
+                      <input 
+                        type="number" 
+                        value={monthlyIncome || ""} 
+                        onChange={async (e) => {
+                          const val = e.target.value === "" ? 0 : parseInt(e.target.value);
+                          setMonthlyIncome(val);
+                          if (user) await setDoc(doc(db, "users", user.uid, "config", "main"), { monthlyIncome: val }, { merge: true });
+                        }}
+                        className="w-full bg-slate-950 border border-slate-800 rounded-xl pl-8 pr-4 py-3 text-sm text-white font-bold outline-none border-focus:border-emerald-500"
+                        placeholder="e.g. 50000"
+                      />
+                    </div>
                   </div>
-                  <div className="flex bg-slate-950 p-1 rounded-xl gap-1">
-                    <button 
-                      onClick={() => setModelFlavor("gemini")}
-                      className={`px-3 py-1.5 text-[10px] font-black uppercase rounded-lg transition-all ${modelFlavor === 'gemini' ? 'bg-emerald-500 text-white shadow-lg shadow-emerald-500/20' : 'text-slate-600 hover:text-slate-400'}`}
-                    >
-                      Gemini
-                    </button>
-                    <button 
-                      onClick={() => setModelFlavor("gpt")}
-                      className={`px-3 py-1.5 text-[10px] font-black uppercase rounded-lg transition-all ${modelFlavor === 'gpt' ? 'bg-blue-500 text-white shadow-lg shadow-blue-500/20' : 'text-slate-600 hover:text-slate-400'}`}
-                    >
-                      GPT
-                    </button>
+                  <div className="space-y-1">
+                    <label className="text-[10px] font-black text-slate-500 uppercase tracking-widest">Total Outstanding Debt</label>
+                    <div className="relative">
+                      <span className="absolute left-3 top-1/2 -translate-y-1/2 text-rose-500 text-sm font-bold">₹</span>
+                      <input 
+                        type="number" 
+                        value={totalDebt || ""} 
+                        onChange={async (e) => {
+                          const val = e.target.value === "" ? 0 : parseInt(e.target.value);
+                          setTotalDebt(val);
+                          if (user) await setDoc(doc(db, "users", user.uid, "config", "main"), { totalDebt: val }, { merge: true });
+                        }}
+                        className="w-full bg-slate-950 border border-slate-800 rounded-xl pl-8 pr-4 py-3 text-sm text-white font-bold outline-none"
+                        placeholder="Loans, EMIs, etc."
+                      />
+                    </div>
+                  </div>
+                  <div className="space-y-1">
+                    <label className="text-[10px] font-black text-slate-500 uppercase tracking-widest">Emergency Fund Target</label>
+                    <div className="relative">
+                      <span className="absolute left-3 top-1/2 -translate-y-1/2 text-blue-500 text-sm font-bold">₹</span>
+                      <input 
+                        type="number" 
+                        value={emergencyFundTarget || ""} 
+                        onChange={async (e) => {
+                          const val = e.target.value === "" ? 0 : parseInt(e.target.value);
+                          setEmergencyFundTarget(val);
+                          if (user) await setDoc(doc(db, "users", user.uid, "config", "main"), { emergencyFundTarget: val }, { merge: true });
+                        }}
+                        className="w-full bg-slate-950 border border-slate-800 rounded-xl pl-8 pr-4 py-3 text-sm text-white font-bold outline-none border-focus:border-emerald-500"
+                        placeholder="Target Amount"
+                      />
+                    </div>
+                  </div>
+                  <div className="space-y-1">
+                    <label className="text-[10px] font-black text-slate-500 uppercase tracking-widest">Emergency Fund Current Status</label>
+                    <div className="relative">
+                      <span className="absolute left-3 top-1/2 -translate-y-1/2 text-blue-500 text-sm font-bold">₹</span>
+                      <input 
+                        type="number" 
+                        value={emergencyFund || ""} 
+                        onChange={async (e) => {
+                          const val = e.target.value === "" ? 0 : parseInt(e.target.value);
+                          setEmergencyFund(val);
+                          if (user) await setDoc(doc(db, "users", user.uid, "config", "main"), { emergencyFund: val }, { merge: true });
+                        }}
+                        className="w-full bg-slate-950 border border-slate-800 rounded-xl pl-8 pr-4 py-3 text-sm text-white font-bold outline-none"
+                        placeholder="Current Savings"
+                      />
+                    </div>
                   </div>
                 </div>
               </div>
 
               {/* Category Budget Manager */}
               <div className="space-y-3">
-                <h3 className="text-[10px] font-black uppercase tracking-widest text-slate-600 px-2">Manage Category Budgets</h3>
+                <div className="flex justify-between items-center px-2">
+                  <h3 className="text-[10px] font-black uppercase tracking-widest text-slate-600">Category Budget Allocation</h3>
+                  <div className="flex items-center gap-3">
+                    <div className="text-right">
+                      <p className="text-[8px] font-black uppercase text-slate-500 tracking-widest">Unallocated</p>
+                      <p className={`text-xs font-black ${ (monthlyIncome - (Object.values(categoryBudgets) as number[]).reduce((a: number, b: number) => a + b, 0)) < 0 ? 'text-rose-400' : 'text-emerald-400'}`}>
+                        {formatINR(monthlyIncome - (Object.values(categoryBudgets) as number[]).reduce((a: number, b: number) => a + b, 0))}
+                      </p>
+                    </div>
+                  </div>
+                </div>
+
                 <div className="bg-slate-900 border border-slate-800 rounded-3xl p-4 space-y-4">
+                  {/* Visual Allocation Bar */}
+                  <div className="px-1 space-y-1.5">
+                    <div className="flex justify-between items-end text-[9px] font-black uppercase tracking-widest">
+                       <span className="text-slate-400">Budget Usage</span>
+                       <span className="text-slate-200">
+                         {formatINR((Object.values(categoryBudgets) as number[]).reduce((a: number, b: number) => a + b, 0))} / {formatINR(monthlyIncome)}
+                       </span>
+                    </div>
+                    <div className="h-2 w-full bg-slate-950 rounded-full overflow-hidden flex border border-slate-800">
+                      {(Object.entries(categoryBudgets) as [string, number][]).map(([cat, amount], idx) => {
+                        const percent = (amount / (monthlyIncome || 1)) * 100;
+                        if (percent <= 0) return null;
+                        return (
+                          <div 
+                            key={cat}
+                            style={{ 
+                              width: `${percent}%`, 
+                              backgroundColor: CATEGORIES[cat]?.color || '#ffffff'
+                            }} 
+                            className="h-full first:rounded-l-full last:rounded-r-full transition-all"
+                            title={`${cat}: ${percent.toFixed(1)}%`}
+                          />
+                        );
+                      })}
+                    </div>
+                  </div>
+
                   {Object.keys(CATEGORIES).filter(cat => !['Salary', 'Business', 'Freelance', 'Investment', 'Gift'].includes(cat)).map(cat => (
-                    <div key={cat} className="flex items-center justify-between gap-4">
-                      <div className="flex items-center gap-2 min-w-[100px]">
-                        <span>{CATEGORIES[cat].icon}</span>
-                        <span className="text-xs font-bold text-slate-300">{cat}</span>
+                    <div key={cat} className="flex flex-col gap-2 p-3 bg-slate-950/30 rounded-2xl border border-slate-800/50">
+                      <div className="flex items-center justify-between">
+                        <div className="flex items-center gap-2">
+                          <span className="bg-slate-900 w-8 h-8 flex items-center justify-center rounded-lg">{CATEGORIES[cat].icon}</span>
+                          <span className="text-[11px] font-black text-slate-200">{cat}</span>
+                        </div>
+                        <button 
+                          onClick={async () => {
+                            const related = transactions.filter(t => t.category === cat && t.type === 'expense');
+                            if (related.length === 0) {
+                              showToast(`No data for ${cat} yet!`, "warn");
+                              return;
+                            }
+                            
+                            showToast("Brainstorming with AI...", "success");
+                            
+                            try {
+                              const response = await fetch("/api/suggest-budget", {
+                                method: "POST",
+                                headers: { "Content-Type": "application/json" },
+                                body: JSON.stringify({ category: cat, transactions: related })
+                              });
+                              
+                              if (response.status === 429) {
+                                const errorData = await response.json();
+                                showToast(errorData.message || "Daily AI limit reached.", "error");
+                                return;
+                              }
+                              
+                              if (!response.ok) throw new Error("AI call failed");
+                              
+                              const data = await response.json();
+                              const suggest = data.suggestedAmount;
+                              
+                              const updated = { ...categoryBudgets, [cat]: suggest };
+                              setCategoryBudgets(updated);
+                              if (user) await setDoc(doc(db, "users", user.uid, "config", "main"), { categoryBudgets: updated }, { merge: true });
+                              showToast(`AI Suggests ₹${suggest}: ${data.reasoning}`, "success");
+                            } catch (e) {
+                              // Fallback to heuristic
+                              const total = related.reduce((s, t) => s + t.amount, 0);
+                              const distinctMonths = new Set(related.map(t => new Date(t.date).getMonth())).size || 1;
+                              const avg = total / distinctMonths;
+                              const suggest = Math.ceil((avg * 1.1) / 100) * 100;
+                              
+                              const updated = { ...categoryBudgets, [cat]: suggest };
+                              setCategoryBudgets(updated);
+                              if (user) await setDoc(doc(db, "users", user.uid, "config", "main"), { categoryBudgets: updated }, { merge: true });
+                              showToast(`Suggested ₹${suggest} (Heuristic)`, "success");
+                            }
+                          }}
+                          className="bg-emerald-500/10 text-emerald-400 p-1.5 rounded-lg border border-emerald-500/20 hover:bg-emerald-500/20 transition-all flex items-center gap-1.5 group"
+                        >
+                          <Sparkles size={11} className="group-hover:animate-pulse" />
+                          <span className="text-[9px] font-black uppercase tracking-widest">Suggest</span>
+                        </button>
                       </div>
-                      <div className="flex-1 relative">
-                        <span className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-500 text-xs">₹</span>
+                      <div className="relative">
+                        <span className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-500 text-xs font-bold">₹</span>
                         <input 
                           type="number"
                           value={categoryBudgets[cat] || ""}
@@ -2074,16 +3713,16 @@ export default function App() {
                             setCategoryBudgets(updated);
                             if (user) {
                               try {
-                                await setDoc(doc(db, "users", user.uid, "config", "budgets"), {
+                                await setDoc(doc(db, "users", user.uid, "config", "main"), {
                                   categoryBudgets: updated
-                                });
+                                }, { merge: true });
                               } catch (e) {
                                 console.error("Failed to save budget", e);
                               }
                             }
                           }}
                           placeholder="0"
-                          className="w-full bg-slate-950 border border-slate-800 rounded-xl pl-6 pr-3 py-2 text-xs text-emerald-400 font-bold focus:ring-1 focus:ring-emerald-500/50 outline-none"
+                          className="w-full bg-slate-900 border border-slate-800 rounded-xl pl-8 pr-4 py-2.5 text-sm text-white font-bold outline-none focus:border-emerald-500 transition-all"
                         />
                       </div>
                     </div>

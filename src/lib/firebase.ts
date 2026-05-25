@@ -18,6 +18,7 @@ import {
   doc,
   setDoc,
   deleteDoc,
+  updateDoc,
   getDocs,
   limit,
   serverTimestamp
@@ -85,6 +86,7 @@ export {
   doc, 
   setDoc, 
   deleteDoc, 
+  updateDoc,
   getDocs, 
   limit,
   serverTimestamp

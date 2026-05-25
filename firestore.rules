@@ -29,29 +29,27 @@ service cloud.firestore {
 
     // Validation patterns
     function isValidTransaction(data) {
-      return data.keys().hasAll(['userId', 'type', 'amount', 'description', 'category', 'date']) &&
-             data.keys().size() == 6 &&
-             data.userId == request.auth.uid &&
+      let requiredFields = ['type', 'amount', 'description', 'category', 'date'];
+      return data.keys().hasAll(requiredFields) &&
              data.type in ['income', 'expense'] &&
              data.amount is number &&
-             data.description is string && data.description.size() <= 500 &&
+             data.description is string && data.description.size() <= 1000 &&
              data.category is string &&
              data.date is string;
     }
 
     function isValidMessage(data) {
-      return data.keys().hasAll(['userId', 'from', 'text', 'timestamp']) &&
-             data.keys().size() == 4 &&
-             data.userId == request.auth.uid &&
+      let requiredFields = ['from', 'text', 'timestamp'];
+      return data.keys().hasAll(requiredFields) &&
              data.from in ['bot', 'user'] &&
-             data.text is string && data.text.size() <= 5000 &&
+             data.text is string && data.text.size() <= 10000 &&
              data.timestamp is number;
     }
 
     function isValidConfig(data) {
-      return data.keys().hasAll(['categoryBudgets']) &&
-             data.keys().size() == 1 &&
-             data.categoryBudgets is map;
+      // Configuration can contain any of these keys
+      let allowedKeys = ['categoryBudgets', 'monthlyIncome', 'totalDebt', 'emergencyFund', 'goals'];
+      return data.keys().hasAny(allowedKeys);
     }
 
     // User collection gate
@@ -63,8 +61,7 @@ service cloud.firestore {
         allow get: if isOwner(userId);
         allow create: if isOwner(userId) && isValidTransaction(incoming());
         allow update: if isOwner(userId) && isValidTransaction(incoming()) && 
-                        incoming().userId == existing().userId &&
-                        incoming().date == existing().date; // date immutable
+                        incoming().userId == existing().userId;
         allow delete: if isOwner(userId);
       }
 
@@ -76,7 +73,7 @@ service cloud.firestore {
         allow delete: if isOwner(userId);
       }
 
-      match /config/budgets {
+      match /config/{configId} {
         allow get: if isOwner(userId);
         allow create, update: if isOwner(userId) && isValidConfig(incoming());
         allow delete: if isOwner(userId);
